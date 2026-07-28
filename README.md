@@ -13,13 +13,13 @@ quietly throttling itself down to a quarter of its speed.
 
 That bothered me enough to build one. It lives in the Mac menu bar.
 
-<img src="docs/screenshot.png" width="420" alt="A green status LED in the macOS menu bar showing an NVIDIA DGX Spark is up, with GPU, CPU, memory, disk and network readings below it">
+<img src="docs/screenshot.png" width="420" alt="A green status LED in the macOS menu bar showing an NVIDIA DGX Spark running inference at 96% GPU, with CPU, unified memory, disk and network readings below it">
 
-**🟢 up · 🟡 something is off · 🔴 unreachable**
+**🟢 up · 🟡 something is off · 🔴 in trouble, or not answering**
 
 Green means the Spark is up and nothing is overheating, throttled or out of
-memory. Click the dot for the numbers — or shut the box down before you pack it
-into a bag.
+memory — above, it is 96% busy and perfectly happy. Click the dot for the
+numbers, or shut the box down before you pack it into a bag.
 
 ## Install
 
@@ -59,6 +59,11 @@ because GB10 is not a discrete GPU:
 * **A throttled Spark** — busy GPU drawing 14–25 W at a low SM clock — turns the
   dot yellow. It is the most common reason a demo runs at a quarter speed while
   every dashboard still looks green.
+
+When something does go wrong, the dot turns and says so in words, not in a
+metric you have to interpret:
+
+<img src="docs/screenshot-memory-pressure.png" width="420" alt="A red status LED in the macOS menu bar warning that memory pressure is stalling everything, with /proc/pressure/memory full avg10 = 4.74 and the note that the model does not fit and inference is waiting on memory">
 
 Thresholds are adapted from [spark-doctor](https://github.com/joeynyc/spark-doctor)
 (MIT), whose numbers come from reported DGX Spark field behaviour rather than
