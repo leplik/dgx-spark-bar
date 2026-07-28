@@ -27,7 +27,14 @@ final class Store: ObservableObject {
             var lastDiscovery = Date.distantPast
             while !Task.isCancelled {
                 guard let self else { return }
-                if Date().timeIntervalSince(lastDiscovery) >= self.rediscoverEvery || self.agents.isEmpty {
+                // Rediscover on schedule, when nothing is known — and immediately
+                // after any failure. Moving between networks (office LAN → phone
+                // hotspot) invalidates the address we found the box at, and
+                // waiting out the full interval would show a red dot for half a
+                // minute while a perfectly healthy box sits on the tailnet.
+                if Date().timeIntervalSince(lastDiscovery) >= self.rediscoverEvery
+                    || self.agents.isEmpty
+                    || !self.failures.isEmpty {
                     await self.rediscover()
                     lastDiscovery = Date()
                 }
