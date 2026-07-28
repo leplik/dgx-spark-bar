@@ -1,0 +1,12 @@
+<?xml version="1.0" standalone='no'?>
+<!DOCTYPE service-group SYSTEM "avahi-service.dtd">
+<!-- Makes the box discoverable on the local network. The tailnet path does not
+     need this: the client enumerates tailnet peers and probes them directly. -->
+<service-group>
+  <name replace-wildcards="yes">dgx-spark-bar on %h</name>
+  <service>
+    <type>_dgx-spark-bar._tcp</type>
+    <port>@PORT@</port>
+    <txt-record>version=0.1.0</txt-record>
+  </service>
+</service-group>

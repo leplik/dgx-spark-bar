@@ -1,0 +1,9 @@
+.DS_Store
+__pycache__/
+*.pyc
+
+# SwiftPM
+macos/.build/
+macos/build/
+macos/.swiftpm/
+*.xcuserstate

@@ -1,0 +1,23 @@
+[Unit]
+Description=dgx-spark-bar agent — DGX Spark monitoring and control
+Documentation=https://github.com/leplik/dgx-spark-bar
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@USER@
+ExecStart=/usr/local/bin/dgx-spark-bar-agent
+Restart=always
+RestartSec=3
+# The agent shells out to sudo for poweroff/reboot, so privilege escalation
+# must stay possible; the sudoers drop-in narrows it to exactly those two.
+NoNewPrivileges=no
+PrivateTmp=yes
+ProtectHome=no
+# "full" and not "strict": strict would remount /run read-only too, and writing
+# to /run/docker.sock is exactly how the restart-stack action works.
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target
