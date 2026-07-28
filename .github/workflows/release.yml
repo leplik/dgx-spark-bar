@@ -8,9 +8,14 @@
 # Secrets, all optional but all-or-nothing:
 #   MACOS_CERT_P12      base64 of a "Developer ID Application" .p12
 #   MACOS_CERT_PASSWORD the password that .p12 was exported with
-#   NOTARY_KEY_P8       base64 of an App Store Connect API key (.p8)
-#   NOTARY_KEY_ID       that key's Key ID
-#   NOTARY_ISSUER_ID    the issuer UUID from App Store Connect
+#   NOTARY_APPLE_ID     the Apple ID that owns the developer account
+#   NOTARY_TEAM_ID      the 10-character team id, as it appears in the signature
+#   NOTARY_PASSWORD     an app-specific password from appleid.apple.com
+#
+# notarytool also accepts an App Store Connect API key (--key/--key-id/--issuer)
+# instead of the three NOTARY_* values above. The app-specific password is used
+# here because it can be regenerated in a minute, while a lost .p8 cannot be
+# downloaded twice and has to be revoked and replaced.
 name: release
 
 on:
@@ -52,7 +57,10 @@ jobs:
           KEYCHAIN="$RUNNER_TEMP/build.keychain-db"
           KEYCHAIN_PASSWORD="$(uuidgen)"
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
-          security set-keychain-settings -lut 900 "$KEYCHAIN"
+          # Long enough to outlast a cold-runner Swift build: codesign runs at the
+          # end of build-app.sh, and a relocked keychain fails it with
+          # errSecInteractionNotAllowed after the build is already paid for.
+          security set-keychain-settings -lut 3600 "$KEYCHAIN"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
 
           echo "$CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
@@ -83,28 +91,30 @@ jobs:
       - name: Notarize and staple
         if: steps.sign.outputs.identity != '-'
         env:
-          NOTARY_KEY_P8: ${{ secrets.NOTARY_KEY_P8 }}
-          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
-          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+          NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
+          NOTARY_TEAM_ID: ${{ secrets.NOTARY_TEAM_ID }}
+          NOTARY_PASSWORD: ${{ secrets.NOTARY_PASSWORD }}
         run: |
           set -euo pipefail
-          if [[ -z "${NOTARY_KEY_P8:-}" ]]; then
-            echo "::error::a signed build needs NOTARY_KEY_P8, NOTARY_KEY_ID and NOTARY_ISSUER_ID"
+          if [[ -z "${NOTARY_PASSWORD:-}" ]]; then
+            echo "::error::a signed build needs NOTARY_APPLE_ID, NOTARY_TEAM_ID and NOTARY_PASSWORD"
             exit 1
           fi
-          echo "$NOTARY_KEY_P8" | base64 --decode > "$RUNNER_TEMP/notary.p8"
           ditto -c -k --keepParent macos/build/DGXSparkBar.app "$RUNNER_TEMP/notarize.zip"
+          # --wait blocks until Apple returns a verdict; without it the job would
+          # go on to staple a ticket that does not exist yet.
           xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" \
-            --key "$RUNNER_TEMP/notary.p8" \
-            --key-id "$NOTARY_KEY_ID" \
-            --issuer "$NOTARY_ISSUER_ID" \
+            --apple-id "$NOTARY_APPLE_ID" \
+            --team-id "$NOTARY_TEAM_ID" \
+            --password "$NOTARY_PASSWORD" \
             --wait --timeout 30m
-          rm -f "$RUNNER_TEMP/notary.p8"
           # Staple after the verdict, so the app carries its own ticket and
           # launches on a Mac that is offline the first time it is opened.
           xcrun stapler staple macos/build/DGXSparkBar.app
 
       - name: Package
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
         run: |
           set -euo pipefail
           mkdir -p dist
@@ -114,24 +124,48 @@ jobs:
           STAGE="$RUNNER_TEMP/pkg/dgx-spark-bar-agent"
           mkdir -p "$STAGE"
           cp -R agent/. "$STAGE/"
-          chmod +x "$STAGE"/*.sh "$STAGE"/*.py
+          # The tag is the release's version for BOTH halves. Without this the
+          # agent keeps its source literal and every release after 0.2.0 ships a
+          # box that misreports itself on /ping and over mDNS.
+          sed -i '' "s/^VERSION = \".*\"$/VERSION = \"$VERSION\"/" "$STAGE/dgx_spark_bar_agent.py"
+          grep -q "^VERSION = \"$VERSION\"$" "$STAGE/dgx_spark_bar_agent.py"
+          # find, not a glob: an unmatched glob is passed through literally and
+          # would fail the release here, after notarization has already been paid for.
+          find "$STAGE" -type f \( -name '*.sh' -o -name '*.py' \) -exec chmod +x {} +
           tar czf dist/dgx-spark-bar-agent.tar.gz -C "$RUNNER_TEMP/pkg" dgx-spark-bar-agent
 
-          shasum -a 256 dist/DGXSparkBar.zip dist/dgx-spark-bar-agent.tar.gz > dist/SHA256SUMS.txt
+          # Basenames only: the assets are downloaded flat, so `shasum -c` has to
+          # find them next to the sums file rather than under a dist/ that never ships.
+          (cd dist && shasum -a 256 DGXSparkBar.zip dgx-spark-bar-agent.tar.gz > SHA256SUMS.txt)
           cat dist/SHA256SUMS.txt
 
       - name: Verify the signature survived packaging
         if: steps.sign.outputs.identity != '-'
         run: |
           set -euo pipefail
-          codesign --verify --deep --strict --verbose=2 macos/build/DGXSparkBar.app
-          spctl --assess --type execute --verbose=4 macos/build/DGXSparkBar.app
+          # Unpack the zip that actually ships. Verifying macos/build/ instead
+          # would skip the one step between signing and the user: the archive.
+          rm -rf "$RUNNER_TEMP/verify"
+          ditto -x -k dist/DGXSparkBar.zip "$RUNNER_TEMP/verify"
+          APP="$RUNNER_TEMP/verify/DGXSparkBar.app"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          spctl --assess --type execute --verbose=4 "$APP"
+          xcrun stapler validate "$APP"
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: DGXSparkBar-${{ steps.meta.outputs.version }}
           path: dist/*
+
+      - name: Remove the signing keychain
+        if: always() && steps.sign.outputs.identity != '-'
+        run: |
+          # delete-keychain also drops it from the user search list this job
+          # rewrote. A hosted runner is thrown away either way, but a self-hosted
+          # mac would otherwise keep the Developer ID private key searchable by
+          # every later job on that machine.
+          security delete-keychain "$RUNNER_TEMP/build.keychain-db" 2>/dev/null || true
 
       - name: Publish release
         if: startsWith(github.ref, 'refs/tags/')
