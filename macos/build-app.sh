@@ -7,7 +7,7 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 CONFIG="${1:-release}"
 APP="build/DGXSparkBar.app"
-VERSION="0.1.0"
+VERSION="0.2.0"
 
 echo "==> swift build ($CONFIG)"
 swift build -c "$CONFIG"

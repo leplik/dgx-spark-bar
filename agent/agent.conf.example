@@ -1,30 +1,21 @@
 # dgx-spark-bar agent configuration — /etc/dgx-spark-bar/agent.conf
-# install.sh writes this file once (generating a TOKEN) and never overwrites it.
+# install.sh writes this file once and never overwrites it, so local edits
+# survive an upgrade.
 
 # Where the agent listens. 0.0.0.0 is intentional: it must be reachable both
 # over the tailnet and over a plain LAN at a demo.
 #
 # There is no authentication. Anyone who can reach this port can read the
-# status and run the whitelisted actions, including powering the box off — so
-# keep the agent on networks you trust. If you need it on an untrusted one,
-# set BIND to the tailnet address (100.x.y.z) instead of inventing a password.
+# status and reboot or power the box off — so keep the agent on networks you
+# trust. If you need it on an untrusted one, set BIND to the tailnet address
+# (100.x.y.z) instead of inventing a password.
 BIND=0.0.0.0
 PORT=8765
-
-# Optional integrations — omit a line and the section simply disappears
-# from /status instead of showing a broken value.
-OLLAMA_URL=http://127.0.0.1:11434
-COMPOSE_FILE=/home/zolli/llm-poc/docker-compose.yml
-WEBUI_URL=http://127.0.0.1:3000
 
 # Mount points to report, comma-separated.
 DISKS=/
 
-# Long-running work worth watching from the menu bar.
-JOB_PATTERNS=pull-,ollama pull,hf download
-JOB_LOGS=/home/zolli/llm-poc/pull.log,/home/zolli/llm-poc/pull-phase2.log,/home/zolli/llm-poc/pull-phase3.log
-
-# Thresholds that turn the menu-bar dot yellow.
+# Thresholds that turn the menu-bar dot yellow, and red.
 WARN_DISK_PCT=85
-WARN_MEM_PCT=90
-WARN_GPU_TEMP=80
+WARN_GPU_TEMP=85
+CRIT_GPU_TEMP=90

@@ -1,7 +1,7 @@
 [Unit]
-Description=dgx-spark-bar agent — DGX Spark monitoring and control
+Description=dgx-spark-bar agent — DGX Spark monitoring and power control
 Documentation=https://github.com/leplik/dgx-spark-bar
-After=network-online.target docker.service
+After=network-online.target
 Wants=network-online.target
 
 [Service]
@@ -14,9 +14,11 @@ RestartSec=3
 # must stay possible; the sudoers drop-in narrows it to exactly those two.
 NoNewPrivileges=no
 PrivateTmp=yes
-ProtectHome=no
-# "full" and not "strict": strict would remount /run read-only too, and writing
-# to /run/docker.sock is exactly how the restart-stack action works.
+# "read-only" and not "yes": DISKS often lists /home, and "yes" would replace it
+# with an empty tmpfs whose free space is not the number anyone wants to see.
+ProtectHome=read-only
+# "full" and not "strict": sudo keeps its timestamp files under /run, which
+# strict would remount read-only.
 ProtectSystem=full
 
 [Install]

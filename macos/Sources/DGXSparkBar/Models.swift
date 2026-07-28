@@ -1,8 +1,9 @@
 import Foundation
 
-// Mirrors the agent's JSON. Everything the agent may omit (no GPU, no docker,
-// no ollama) is optional here — a Spark with half the stack missing must still
-// render, not fail to decode.
+// Mirrors the agent's JSON. Anything the agent may omit (a box with no GPU, a
+// kernel with no thermal zones) is optional here — a partial Spark must still
+// render, not fail to decode. Fields the agent sends but nothing draws are
+// simply absent: Codable ignores what it was not asked for.
 
 struct Ping: Codable {
     let app: String
@@ -23,8 +24,6 @@ struct Finding: Codable, Identifiable, Hashable {
 
 struct CPUInfo: Codable {
     let pct: Double?
-    let cores: [Double]?
-    let loadavg: [Double]?
     let tempC: Double?
 }
 
@@ -33,7 +32,6 @@ struct MemoryInfo: Codable {
     let usedKb: Double?
     let availKb: Double?
     let pct: Double?
-    let swapUsedKb: Double?
 
     var usedGb: Double { (usedKb ?? 0) / 1e6 }
     var totalGb: Double { (totalKb ?? 0) / 1e6 }
@@ -52,8 +50,6 @@ struct NetInfo: Codable {
     let iface: String?
     let rxMbs: Double?
     let txMbs: Double?
-    let tailscaleIp: String?
-    let lanIp: String?
 }
 
 struct DiskInfo: Codable, Identifiable {
@@ -66,47 +62,12 @@ struct DiskInfo: Codable, Identifiable {
     var id: String { mount }
 }
 
-struct ContainerInfo: Codable, Identifiable {
-    let name: String
-    let image: String?
-    let state: String
-    let status: String?
-
-    var id: String { name }
-    var isRunning: Bool { state == "running" }
-}
-
-struct LoadedModel: Codable, Identifiable {
-    let name: String
-    let memGb: Double
-    var id: String { name }
-}
-
-struct OllamaInfo: Codable {
-    let configured: Bool
-    let reachable: Bool?
-    let loaded: [LoadedModel]?
-    let modelCount: Int?
-}
-
-struct JobInfo: Codable, Identifiable {
-    let kind: String
-    let name: String
-    let running: Bool?
-    let count: Int?
-    let tail: [String]?
-
-    var id: String { kind + ":" + name }
-}
-
+/// One poll's worth of the two series the menu draws. The agent keeps power and
+/// clock alongside these for its own power-cap rule and does not send them.
 struct Sample: Codable, Hashable {
     let t: Double
     let cpu: Double
     let gpu: Double
-    let mem: Double
-    let rx: Double
-    let w: Double?
-    let mhz: Double?
 }
 
 struct Status: Codable {
@@ -122,12 +83,8 @@ struct Status: Codable {
     let gpu: GPUInfo
     let net: NetInfo
     let disks: [DiskInfo]
-    let docker: [ContainerInfo]
-    let ollama: OllamaInfo
-    let jobs: [JobInfo]
     let history: [Sample]
     let actions: [String]
-    let webUiUrl: String?
 }
 
 enum Health: String {

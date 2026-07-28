@@ -56,8 +56,9 @@ struct AgentClient {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONSerialization.data(withJSONObject: ["action": action])
 
-        // A stack restart pulls images and waits on health checks; give it room.
-        let (data, response) = try await session(120).data(for: request)
+        // Both actions answer before they act — the agent replies, then reboots
+        // or powers off a second later — so this waits on nothing but the reply.
+        let (data, response) = try await session(statusTimeout).data(for: request)
         let code = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard code == 200 else { throw AgentError.badResponse(code) }
         return String(data: data, encoding: .utf8) ?? ""

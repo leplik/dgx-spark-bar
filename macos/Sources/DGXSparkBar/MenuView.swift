@@ -143,7 +143,6 @@ struct MenuView: View {
             } else if let status {
                 metrics(status)
                 if !status.findings.isEmpty { findings(status.findings) }
-                services(status)
                 actions(agent, status)
             } else {
                 Text("…").foregroundStyle(.secondary).font(.system(size: 11))
@@ -221,43 +220,10 @@ struct MenuView: View {
     }
 
     @ViewBuilder
-    private func services(_ status: Status) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            ForEach(status.docker) { container in
-                HStack(spacing: 5) {
-                    Circle()
-                        .fill(container.isRunning ? Color.green : Color.red)
-                        .frame(width: 5, height: 5)
-                    Text(container.name).font(.system(size: 11))
-                    Text(container.status ?? container.state)
-                        .font(.system(size: 10)).foregroundStyle(.tertiary)
-                        .lineLimit(1)
-                }
-            }
-            if let loaded = status.ollama.loaded, !loaded.isEmpty {
-                ForEach(loaded) { model in
-                    Text("\(model.name) — \(String(format: "%.1f", model.memGb)) GB resident")
-                        .font(.system(size: 10)).foregroundStyle(.secondary)
-                }
-            } else if status.ollama.reachable == true {
-                Text("no model loaded · \(status.ollama.modelCount ?? 0) on disk")
-                    .font(.system(size: 10)).foregroundStyle(.tertiary)
-            }
-            ForEach(status.jobs.filter { $0.running == true }) { job in
-                Text("running: \(job.name)")
-                    .font(.system(size: 10)).foregroundStyle(.tertiary)
-            }
-        }
-    }
-
-    @ViewBuilder
     private func actions(_ agent: Agent, _ status: Status) -> some View {
         let running = store.busy?.hasPrefix(agent.machineId) == true
 
         HStack(spacing: 6) {
-            if status.actions.contains("restart-stack") {
-                Button("Restart stack") { store.perform("restart-stack", on: agent) }
-            }
             if status.actions.contains("reboot") {
                 Button("Reboot") { confirming = (agent, "reboot") }
             }
@@ -268,12 +234,6 @@ struct MenuView: View {
         }
         .font(.system(size: 11))
         .disabled(running)
-
-        if let url = status.webUiUrl, !url.isEmpty {
-            Button("Open web chat") { openWebUI(agent, path: url) }
-                .buttonStyle(.link)
-                .font(.system(size: 11))
-        }
     }
 
     private var footer: some View {
@@ -293,15 +253,6 @@ struct MenuView: View {
     }
 
     // MARK: helpers
-
-    /// The agent reports the web UI as its own localhost URL; rewrite the host
-    /// to whichever address we actually reached the box on.
-    private func openWebUI(_ agent: Agent, path: String) {
-        guard var components = URLComponents(string: path) else { return }
-        components.host = agent.baseURL.host
-        guard let url = components.url else { return }
-        NSWorkspace.shared.open(url)
-    }
 
     private func uptime(_ seconds: Double) -> String {
         let total = Int(seconds)

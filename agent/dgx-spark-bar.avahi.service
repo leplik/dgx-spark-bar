@@ -7,6 +7,6 @@
   <service>
     <type>_dgx-spark-bar._tcp</type>
     <port>@PORT@</port>
-    <txt-record>version=0.1.0</txt-record>
+    <txt-record>version=0.2.0</txt-record>
   </service>
 </service-group>

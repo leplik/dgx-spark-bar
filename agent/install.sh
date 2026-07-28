@@ -21,7 +21,6 @@ if [[ -z "$TARGET_USER" || "$TARGET_USER" == "root" ]]; then
   echo "Set SPARKBAR_USER to the non-root user the agent should run as." >&2
   exit 1
 fi
-TARGET_HOME="$(getent passwd "$TARGET_USER" | cut -d: -f6)"
 
 echo "==> agent binary"
 install -m 0755 "$SRC/dgx_spark_bar_agent.py" /usr/local/bin/dgx-spark-bar-agent
@@ -31,13 +30,6 @@ install -d -m 0755 "$CONF_DIR"
 if [[ -f "$CONF" ]]; then
   echo "    $CONF exists — kept as is"
 else
-  # A compose file is the difference between "restart the stack" working and
-  # being greyed out; guess the obvious location, the user can fix the line.
-  COMPOSE=""
-  for candidate in "$TARGET_HOME"/*/docker-compose.yml "$TARGET_HOME"/docker-compose.yml; do
-    [[ -f "$candidate" ]] && { COMPOSE="$candidate"; break; }
-  done
-
   DISKS="/"
   if mountpoint -q /home 2>/dev/null; then DISKS="/,/home"; fi
 
@@ -47,14 +39,7 @@ else
 BIND=0.0.0.0
 PORT=8765
 
-OLLAMA_URL=http://127.0.0.1:11434
-COMPOSE_FILE=$COMPOSE
-WEBUI_URL=http://127.0.0.1:3000
-
 DISKS=$DISKS
-
-JOB_PATTERNS=
-JOB_LOGS=
 
 WARN_DISK_PCT=85
 WARN_GPU_TEMP=85
@@ -88,11 +73,6 @@ if [[ -d /etc/avahi/services ]]; then
   systemctl reload avahi-daemon 2>/dev/null || systemctl restart avahi-daemon || true
 else
   echo "==> avahi not installed — LAN discovery off, tailnet discovery still works"
-fi
-
-if ! id -nG "$TARGET_USER" | tr ' ' '\n' | grep -qx docker; then
-  echo "!!  $TARGET_USER is not in the docker group — container status and the"
-  echo "!!  restart-stack action will not work. Fix: usermod -aG docker $TARGET_USER"
 fi
 
 sleep 1
