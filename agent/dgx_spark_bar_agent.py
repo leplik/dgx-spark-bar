@@ -43,6 +43,7 @@ import threading
 import time
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import NamedTuple
 from urllib.parse import urlparse
 
 VERSION = "0.2.0"
@@ -53,11 +54,13 @@ MIN_INTERVAL = 1.0    # two clients polling at once share one measurement
 FRESH_WINDOW = 0.2    # length of the self-timed window on the first poll
 STALE_AFTER = 30.0    # older than this and the previous poll is not a baseline
 
+# Every default lives here and nowhere else: conf_int/conf_list fall back to
+# this table rather than to a literal at the call site.
 DEFAULTS = {
     "PORT": "8765",
     "BIND": "0.0.0.0",
     "DISKS": "/",
-    # thresholds -> warning level
+    # thresholds -> warning, and CRIT_GPU_TEMP -> critical
     "WARN_DISK_PCT": "85",
     "WARN_GPU_TEMP": "85",
     "CRIT_GPU_TEMP": "90",
@@ -98,15 +101,15 @@ CONF = load_conf(CONF_PATH)
 
 
 def conf_list(key: str) -> list[str]:
-    raw = CONF.get(key, "")
+    raw = CONF.get(key) or DEFAULTS.get(key, "")
     return [item.strip() for item in raw.split(",") if item.strip()]
 
 
-def conf_int(key: str, fallback: int) -> int:
+def conf_int(key: str) -> int:
     try:
-        return int(CONF.get(key, ""))
-    except (TypeError, ValueError):
-        return fallback
+        return int(CONF[key])
+    except (KeyError, TypeError, ValueError):
+        return int(DEFAULTS[key])
 
 
 # --------------------------------------------------------------------------
@@ -153,8 +156,7 @@ THERMAL_ZONES = sorted(glob.glob("/sys/class/thermal/thermal_zone*/temp"))
 def cpu_total() -> tuple[int, int]:
     """(busy, total) jiffies from the aggregate line of /proc/stat.
 
-    Per-core numbers are deliberately not collected: nothing displays them and
-    they were the bulk of the parsing."""
+    Per-core numbers are deliberately not collected: nothing displays them."""
     for line in read_text("/proc/stat").splitlines():
         if line.startswith("cpu "):
             values = [int(v) for v in line.split()[1:]]
@@ -198,8 +200,7 @@ def pressure(kind: str) -> dict[str, dict[str, float]]:
 def gpu_snapshot() -> dict:
     """GB10: memory fields are N/A by design (unified memory) — we don't fake them.
 
-    The only process this agent spawns while idle-free polling, and the reason
-    the sampling loop was removed: nvidia-smi costs a fork per reading."""
+    The one fork on the request path, and the reason a poll is worth caching."""
     fields = "name,utilization.gpu,temperature.gpu,power.draw,clocks.current.sm"
     rc, out = run(
         ["nvidia-smi", f"--query-gpu={fields}", "--format=csv,noheader,nounits"],
@@ -253,7 +254,7 @@ def cpu_temp() -> float | None:
 
 def disks() -> list[dict]:
     out = []
-    for mount in conf_list("DISKS") or ["/"]:
+    for mount in conf_list("DISKS"):
         try:
             st = os.statvfs(mount)
         except OSError:
@@ -273,6 +274,24 @@ def disks() -> list[dict]:
     return out
 
 
+class Reading(NamedTuple):
+    """Counters that only mean anything as a delta against an earlier reading."""
+
+    busy: int
+    total: int
+    rx: int
+    tx: int
+    at: float
+    iface: str
+
+
+def take_reading() -> Reading:
+    iface = default_iface()
+    busy, total = cpu_total()
+    rx, tx = net_counters(iface)
+    return Reading(busy, total, rx, tx, time.time(), iface)
+
+
 class Monitor:
     """Measures on demand — there is no sampling thread.
 
@@ -282,6 +301,9 @@ class Monitor:
     though, that window would span minutes and average away everything worth
     seeing, so the first poll of a session times its own short one instead.
 
+    A snapshot is reused for MIN_INTERVAL so that several clients polling at
+    once share one nvidia-smi fork rather than queueing up their own.
+
     The history exists for the sparkline and for the power-cap rule, which
     needs a state rather than a single dip. It fills while a client watches
     and simply stops when one goes away.
@@ -289,18 +311,17 @@ class Monitor:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        # (cpu jiffies, net bytes, taken at, interface)
-        self._prev: tuple[tuple[int, int], tuple[int, int], float, str] | None = None
-        self._cached: tuple[dict, float] | None = None
+        self._prev: Reading | None = None
+        self._cached: dict | None = None
         self.history: deque[dict] = deque(maxlen=HISTORY_LEN)
 
     def read(self) -> tuple[dict, list[dict]]:
         with self._lock:
-            if self._cached and time.time() - self._cached[1] < MIN_INTERVAL:
-                return self._cached[0], list(self.history)
+            if self._cached and time.time() - self._cached["ts"] < MIN_INTERVAL:
+                return self._cached, list(self.history)
 
             snapshot = self._measure()
-            self._cached = (snapshot, time.time())
+            self._cached = snapshot
             gpu = snapshot["gpu"]
             self.history.append(
                 {
@@ -316,21 +337,20 @@ class Monitor:
             return snapshot, list(self.history)
 
     def _measure(self) -> dict:
-        iface = default_iface()
+        cur = take_reading()
         prev = self._prev
-        if prev is None or time.time() - prev[2] > STALE_AFTER or prev[3] != iface:
-            prev = (cpu_total(), net_counters(iface), time.time(), iface)
+        if prev is None or cur.at - prev.at > STALE_AFTER or prev.iface != cur.iface:
+            prev = cur                     # no usable baseline — time our own window
             time.sleep(FRESH_WINDOW)
+            cur = take_reading()
+        self._prev = cur
 
-        now = time.time()
-        cur_cpu, cur_net = cpu_total(), net_counters(iface)
-        elapsed = max(now - prev[2], 0.001)
-
-        busy_delta, total_delta = cur_cpu[0] - prev[0][0], cur_cpu[1] - prev[0][1]
-        cpu_pct = round(100.0 * busy_delta / total_delta, 1) if total_delta > 0 else 0.0
-        rx_rate = max(cur_net[0] - prev[1][0], 0) / elapsed / 1e6
-        tx_rate = max(cur_net[1] - prev[1][1], 0) / elapsed / 1e6
-        self._prev = (cur_cpu, cur_net, now, iface)
+        elapsed = max(cur.at - prev.at, 0.001)
+        total_delta = cur.total - prev.total
+        cpu_pct = (
+            round(100.0 * (cur.busy - prev.busy) / total_delta, 1)
+            if total_delta > 0 else 0.0
+        )
 
         mem = meminfo()
         total_kb = mem.get("MemTotal", 0)
@@ -338,7 +358,7 @@ class Monitor:
         used_kb = max(total_kb - avail_kb, 0)
 
         return {
-            "ts": now,
+            "ts": cur.at,
             "cpu": {"pct": cpu_pct, "tempC": cpu_temp()},
             "memory": {
                 "totalKb": total_kb,
@@ -350,10 +370,13 @@ class Monitor:
             },
             "gpu": gpu_snapshot(),
             "net": {
-                "iface": iface,
-                "rxMbs": round(rx_rate, 2),
-                "txMbs": round(tx_rate, 2),
+                "iface": cur.iface,
+                "rxMbs": round(max(cur.rx - prev.rx, 0) / elapsed / 1e6, 2),
+                "txMbs": round(max(cur.tx - prev.tx, 0) / elapsed / 1e6, 2),
             },
+            # rides the same cache: statvfs on a stuck mount is not something to
+            # repeat once per request when the numbers move on a scale of minutes
+            "disks": disks(),
         }
 
 
@@ -435,8 +458,8 @@ def rule_thermal(fast: dict) -> list[dict]:
     temp = (fast.get("gpu") or {}).get("tempC")
     if temp is None:
         return []
-    crit = conf_int("CRIT_GPU_TEMP", 90)
-    warn = conf_int("WARN_GPU_TEMP", 85)
+    crit = conf_int("CRIT_GPU_TEMP")
+    warn = conf_int("WARN_GPU_TEMP")
     if temp >= crit:
         return [finding("thermal.critical", "critical", "GPU is very hot",
                         f"{temp} °C", "Stop the workload and check airflow.")]
@@ -445,21 +468,21 @@ def rule_thermal(fast: dict) -> list[dict]:
     return []
 
 
-def rule_disks(volumes: list[dict]) -> list[dict]:
-    limit = conf_int("WARN_DISK_PCT", 85)
+def rule_disks(fast: dict) -> list[dict]:
+    limit = conf_int("WARN_DISK_PCT")
     return [
         finding("disk.filling_up", "warning", f"Disk {d['mount']} is {d['pct']}% full",
                 f"{d['freeGb']} GB free of {d['totalGb']} GB")
-        for d in volumes if d["pct"] >= limit
+        for d in fast["disks"] if d["pct"] >= limit
     ]
 
 
-def evaluate(fast: dict, volumes: list[dict], history: list[dict]) -> tuple[str, list[dict]]:
+def evaluate(fast: dict, history: list[dict]) -> tuple[str, list[dict]]:
     findings = (
         rule_power_cap(history)
         + rule_memory(fast)
         + rule_thermal(fast)
-        + rule_disks(volumes)
+        + rule_disks(fast)
     )
     if any(f["severity"] == "critical" for f in findings):
         return "error", findings
@@ -468,8 +491,7 @@ def evaluate(fast: dict, volumes: list[dict], history: list[dict]) -> tuple[str,
 
 def build_status() -> dict:
     fast, history = MONITOR.read()
-    volumes = disks()
-    level, findings = evaluate(fast, volumes, history)
+    level, findings = evaluate(fast, history)
 
     return {
         "app": "dgx-spark-bar",
@@ -484,7 +506,7 @@ def build_status() -> dict:
         "memory": fast["memory"],
         "gpu": fast["gpu"],
         "net": fast["net"],
-        "disks": volumes,
+        "disks": fast["disks"],
         # only the two series anyone draws; w/mhz stay on the agent for the rule
         "history": [{"t": s["t"], "cpu": s["cpu"], "gpu": s["gpu"]} for s in history],
         "actions": sorted(ACTIONS),
@@ -506,11 +528,9 @@ def perform(action: str) -> tuple[int, dict]:
         return 400, {"ok": False, "error": f"unknown action: {action}"}
 
     # Both actions take the box away mid-response: answer first, then pull the rug.
-    def later() -> None:
-        time.sleep(1.0)
-        run(cmd, timeout=30.0)
-
-    threading.Thread(target=later, daemon=True).start()
+    timer = threading.Timer(1.0, run, args=(cmd,), kwargs={"timeout": 30.0})
+    timer.daemon = True
+    timer.start()
     return 200, {"ok": True, "action": action, "deferred": True}
 
 
@@ -570,8 +590,8 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    port = conf_int("PORT", 8765)
-    bind = CONF.get("BIND", "0.0.0.0")
+    port = conf_int("PORT")
+    bind = CONF["BIND"]
     print(f"[dgx-spark-bar] {VERSION} listening on {bind}:{port} (no auth — private network only)",
           flush=True)
     ThreadingHTTPServer((bind, port), Handler).serve_forever()

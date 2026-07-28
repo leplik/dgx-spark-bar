@@ -30,8 +30,6 @@ struct CPUInfo: Codable {
 struct MemoryInfo: Codable {
     let totalKb: Double?
     let usedKb: Double?
-    let availKb: Double?
-    let pct: Double?
 
     var usedGb: Double { (usedKb ?? 0) / 1e6 }
     var totalGb: Double { (totalKb ?? 0) / 1e6 }
@@ -62,19 +60,14 @@ struct DiskInfo: Codable, Identifiable {
     var id: String { mount }
 }
 
-/// One poll's worth of the two series the menu draws. The agent keeps power and
-/// clock alongside these for its own power-cap rule and does not send them.
-struct Sample: Codable, Hashable {
-    let t: Double
+/// One poll's worth of the two series the menu draws. The sparkline plots by
+/// position, so the sample's timestamp is not decoded either.
+struct Sample: Codable {
     let cpu: Double
     let gpu: Double
 }
 
 struct Status: Codable {
-    let app: String
-    let version: String
-    let host: String
-    let machineId: String
     let uptimeSec: Double
     let level: String
     let findings: [Finding]

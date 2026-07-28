@@ -68,8 +68,11 @@ systemctl restart dgx-spark-bar-agent
 
 if [[ -d /etc/avahi/services ]]; then
   echo "==> mDNS advertisement"
-  sed "s/@PORT@/$PORT/g" "$SRC/dgx-spark-bar.avahi.service" \
-    > /etc/avahi/services/dgx-spark-bar.service
+  # The agent's VERSION is the only place the number is written; nothing reads
+  # this TXT record back, so a hand-edited copy would drift unnoticed forever.
+  AGENT_VERSION="$(sed -n 's/^VERSION = "\(.*\)"$/\1/p' "$SRC/dgx_spark_bar_agent.py" | head -1)"
+  sed -e "s/@PORT@/$PORT/g" -e "s/@VERSION@/$AGENT_VERSION/g" \
+    "$SRC/dgx-spark-bar.avahi.service" > /etc/avahi/services/dgx-spark-bar.service
   systemctl reload avahi-daemon 2>/dev/null || systemctl restart avahi-daemon || true
 else
   echo "==> avahi not installed — LAN discovery off, tailnet discovery still works"

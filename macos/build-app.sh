@@ -7,7 +7,10 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 CONFIG="${1:-release}"
 APP="build/DGXSparkBar.app"
-VERSION="0.2.0"
+VERSION="${VERSION:-0.2.0}"
+# '-' is an ad-hoc signature, which is all a local build needs. CI passes a
+# Developer ID here so the release can be notarized.
+SIGN_IDENTITY="${SIGN_IDENTITY:--}"
 
 echo "==> swift build ($CONFIG)"
 swift build -c "$CONFIG"
@@ -52,9 +55,17 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-# Ad-hoc signature: gives the bundle a stable identity so macOS can remember the
-# local-network permission instead of re-asking on every rebuild.
-codesign --force --sign - "$APP" >/dev/null 2>&1 || echo "!!  codesign failed — the app still runs, but permissions may reset"
+if [[ "$SIGN_IDENTITY" == "-" ]]; then
+  # Ad-hoc signature: gives the bundle a stable identity so macOS can remember the
+  # local-network permission instead of re-asking on every rebuild.
+  codesign --force --sign - "$APP" >/dev/null 2>&1 \
+    || echo "!!  codesign failed — the app still runs, but permissions may reset"
+else
+  # Notarization rejects anything without the hardened runtime and a secure
+  # timestamp, so a signed build must ask for both up front.
+  echo "==> codesign ($SIGN_IDENTITY)"
+  codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" "$APP"
+fi
 
 echo "==> $PWD/$APP"
 echo "    open it with:  open $APP"

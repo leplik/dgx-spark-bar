@@ -1,0 +1,25 @@
+# dgx-spark-bar
+
+> A status LED for the NVIDIA DGX Spark (GB10), in the macOS menu bar. The Spark
+> ships with no indicator lights at all, so there is no way to tell whether it is
+> up, asleep, or thermally throttled. This puts a green / yellow / red dot in the
+> menu bar of any Mac on the same tailnet or LAN, with GPU, CPU, unified-memory,
+> disk and network readings behind it, plus remote reboot and power off.
+
+Two parts: a stdlib-only Python agent under systemd on the Spark, and a SwiftUI
+menu-bar app on the Mac. No cloud, no account, no database, no telemetry, and no
+authentication — private networks only, by design. The agent has no background
+loop: every number is measured when a client asks.
+
+GB10 specifics it gets right where generic monitors do not: unified Grace +
+Blackwell memory (`nvidia-smi` reports `FB Memory Usage: N/A`, so memory comes
+from `/proc/meminfo`), out-of-memory detected as `/proc/pressure/memory` stalls
+rather than a full framebuffer, and power-capped throttling detected as a busy
+GPU drawing 14–25 W at a low SM clock.
+
+## Docs
+
+- [AGENTS.md](https://github.com/leplik/dgx-spark-bar/blob/main/AGENTS.md): install over ssh step by step, HTTP API, every config key, discovery, security model, troubleshooting. Start here to install it for someone.
+- [README.md](https://github.com/leplik/dgx-spark-bar/blob/main/README.md): what it is and why it exists.
+- [Releases](https://github.com/leplik/dgx-spark-bar/releases/latest): notarized `DGXSparkBar.zip` for the Mac and `dgx-spark-bar-agent.tar.gz` for the Spark.
+- [Agent source](https://github.com/leplik/dgx-spark-bar/blob/main/agent/dgx_spark_bar_agent.py): one file, the whole server side.

@@ -1,0 +1,143 @@
+# Build, sign, notarize and publish a release on a v* tag.
+#
+# Signing is optional: with no MACOS_CERT_P12 secret the job still produces a
+# working ad-hoc-signed app, so a fork can build releases without an Apple
+# Developer account. It just cannot be launched from Finder without clearing
+# quarantine, which is why AGENTS.md keeps the xattr line.
+#
+# Secrets, all optional but all-or-nothing:
+#   MACOS_CERT_P12      base64 of a "Developer ID Application" .p12
+#   MACOS_CERT_PASSWORD the password that .p12 was exported with
+#   NOTARY_KEY_P8       base64 of an App Store Connect API key (.p8)
+#   NOTARY_KEY_ID       that key's Key ID
+#   NOTARY_ISSUER_ID    the issuer UUID from App Store Connect
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: meta
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=0.0.0-dev" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Import signing certificate
+        id: sign
+        env:
+          CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${CERT_P12:-}" ]]; then
+            echo "::warning::no MACOS_CERT_P12 — building ad-hoc signed, downloads will be quarantined"
+            echo "identity=-" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          KEYCHAIN="$RUNNER_TEMP/build.keychain-db"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 900 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+
+          echo "$CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$CERT_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/security
+          rm -f "$RUNNER_TEMP/cert.p12"
+
+          # Without this codesign blocks on a GUI prompt no one can answer.
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+
+          IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN" \
+            | awk -F'"' '/Developer ID Application/ {print $2; exit}')"
+          if [[ -z "$IDENTITY" ]]; then
+            echo "::error::the imported .p12 holds no Developer ID Application identity"
+            exit 1
+          fi
+          echo "identity=$IDENTITY" >> "$GITHUB_OUTPUT"
+          echo "signing as: $IDENTITY"
+
+      - name: Build
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          SIGN_IDENTITY: ${{ steps.sign.outputs.identity }}
+        run: macos/build-app.sh
+
+      - name: Notarize and staple
+        if: steps.sign.outputs.identity != '-'
+        env:
+          NOTARY_KEY_P8: ${{ secrets.NOTARY_KEY_P8 }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${NOTARY_KEY_P8:-}" ]]; then
+            echo "::error::a signed build needs NOTARY_KEY_P8, NOTARY_KEY_ID and NOTARY_ISSUER_ID"
+            exit 1
+          fi
+          echo "$NOTARY_KEY_P8" | base64 --decode > "$RUNNER_TEMP/notary.p8"
+          ditto -c -k --keepParent macos/build/DGXSparkBar.app "$RUNNER_TEMP/notarize.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" \
+            --key "$RUNNER_TEMP/notary.p8" \
+            --key-id "$NOTARY_KEY_ID" \
+            --issuer "$NOTARY_ISSUER_ID" \
+            --wait --timeout 30m
+          rm -f "$RUNNER_TEMP/notary.p8"
+          # Staple after the verdict, so the app carries its own ticket and
+          # launches on a Mac that is offline the first time it is opened.
+          xcrun stapler staple macos/build/DGXSparkBar.app
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          # ditto, not zip: it preserves the bundle's symlinks and resource forks.
+          ditto -c -k --keepParent macos/build/DGXSparkBar.app dist/DGXSparkBar.zip
+
+          STAGE="$RUNNER_TEMP/pkg/dgx-spark-bar-agent"
+          mkdir -p "$STAGE"
+          cp -R agent/. "$STAGE/"
+          chmod +x "$STAGE"/*.sh "$STAGE"/*.py
+          tar czf dist/dgx-spark-bar-agent.tar.gz -C "$RUNNER_TEMP/pkg" dgx-spark-bar-agent
+
+          shasum -a 256 dist/DGXSparkBar.zip dist/dgx-spark-bar-agent.tar.gz > dist/SHA256SUMS.txt
+          cat dist/SHA256SUMS.txt
+
+      - name: Verify the signature survived packaging
+        if: steps.sign.outputs.identity != '-'
+        run: |
+          set -euo pipefail
+          codesign --verify --deep --strict --verbose=2 macos/build/DGXSparkBar.app
+          spctl --assess --type execute --verbose=4 macos/build/DGXSparkBar.app
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DGXSparkBar-${{ steps.meta.outputs.version }}
+          path: dist/*
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes
