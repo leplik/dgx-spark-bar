@@ -21,5 +21,5 @@ GPU drawing 14–25 W at a low SM clock.
 
 - [AGENTS.md](https://github.com/leplik/dgx-spark-bar/blob/main/AGENTS.md): install over ssh step by step, HTTP API, every config key, discovery, security model, troubleshooting. Start here to install it for someone.
 - [README.md](https://github.com/leplik/dgx-spark-bar/blob/main/README.md): what it is and why it exists.
-- [Releases](https://github.com/leplik/dgx-spark-bar/releases/latest): notarized `DGXSparkBar.zip` for the Mac and `dgx-spark-bar-agent.tar.gz` for the Spark.
+- [Releases](https://github.com/leplik/dgx-spark-bar/releases/latest): `DGXSparkBar.zip` for the Mac (Developer ID signed and notarized when the repo carries the Apple secrets, ad-hoc signed otherwise — clear quarantine either way) and `dgx-spark-bar-agent.tar.gz` for the Spark.
 - [Agent source](https://github.com/leplik/dgx-spark-bar/blob/main/agent/dgx_spark_bar_agent.py): one file, the whole server side.

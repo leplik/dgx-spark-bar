@@ -42,7 +42,7 @@ or over Bonjour by itself.
 
 No agent to hand? [AGENTS.md](AGENTS.md) is the same steps as plain commands,
 and [Releases](https://github.com/leplik/dgx-spark-bar/releases/latest) has the
-signed app.
+built app.
 
 ## What the dot knows
 
@@ -56,9 +56,10 @@ because GB10 is not a discrete GPU:
 * **"It did not fit"** shows up as memory-pressure stalls
   (`/proc/pressure/memory`) and swap — never as a full framebuffer, because
   there isn't one to fill.
-* **A throttled Spark** — busy GPU drawing 14–25 W at a low SM clock — turns the
-  dot yellow. It is the most common reason a demo runs at a quarter speed while
-  every dashboard still looks green.
+* **A throttled Spark** — a busy GPU drawing 14–25 W for three polls in a row —
+  turns the dot yellow, and red if the SM clock has collapsed too. It is the most
+  common reason a demo runs at a quarter speed while every dashboard still looks
+  green.
 
 When something does go wrong, the dot turns and says so in words, not in a
 metric you have to interpret:

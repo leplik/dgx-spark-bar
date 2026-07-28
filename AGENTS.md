@@ -24,6 +24,11 @@ ssh <user>@<host> 'hostname; uname -m; python3 --version'
 Expect `aarch64` and Python 3.9+. If ssh fails, stop and report — everything
 below depends on it.
 
+The ssh user must be a **normal user, not `root`**: the agent runs as that user
+and the installer takes it from `SUDO_USER`. If you can only log in as root,
+prefix Step 1's install command with `SPARKBAR_USER=<user>` and pass it through
+with `sudo -E`; otherwise the installer stops and tells you to.
+
 **If `sudo` asks for a password, hand the prompt to the user.** Never try to
 guess or supply one.
 
@@ -77,13 +82,20 @@ If it hangs, see [Troubleshooting](#troubleshooting).
 ```bash
 curl -fsSL -o "${TMPDIR:-/tmp}/DGXSparkBar.zip" \
   https://github.com/leplik/dgx-spark-bar/releases/latest/download/DGXSparkBar.zip
+# ditto merges into an existing bundle rather than replacing it, so on an
+# upgrade clear the old one out first — stale files break the signature.
+osascript -e 'quit app "DGXSparkBar"' 2>/dev/null || true
+rm -rf /Applications/DGXSparkBar.app
 ditto -x -k "${TMPDIR:-/tmp}/DGXSparkBar.zip" /Applications
 xattr -dr com.apple.quarantine /Applications/DGXSparkBar.app 2>/dev/null || true
 open /Applications/DGXSparkBar.app
 ```
 
-Release builds are signed with a Developer ID and notarized, so the `xattr` line
-is belt-and-braces; keep it — it also covers builds a user made themselves.
+Always run the `xattr` line. Releases are Developer ID signed and notarized only
+when the repo carries the Apple secrets; without them the workflow publishes an
+ad-hoc-signed app on purpose (see the header of `.github/workflows/release.yml`),
+and Gatekeeper will refuse a quarantined copy of that. It also covers builds a
+user made themselves.
 
 To build from source instead (needs Xcode's Swift toolchain):
 
@@ -152,7 +164,7 @@ curl -fsS -X POST http://<host>:8765/action \
 | Key | Default | Meaning |
 |---|---|---|
 | `BIND` | `0.0.0.0` | listen address — set to the tailnet IP to restrict exposure |
-| `PORT` | `8765` | HTTP port |
+| `PORT` | `8765` | HTTP port — see the warning below before changing it |
 | `DISKS` | `/` (plus `/home` if separate) | comma-separated mountpoints to report |
 | `WARN_DISK_PCT` | `85` | disk usage that turns the dot yellow |
 | `WARN_GPU_TEMP` | `85` | GPU °C that turns the dot yellow |
@@ -162,14 +174,27 @@ That is the whole file. There is nothing to point at a container stack, an
 inference server or a log directory: this monitors the machine, not what runs on
 it.
 
+**`PORT` is not a free knob.** Discovery assumes 8765: the client probes tailnet
+peers on that port, and the mDNS record carries whatever `PORT` said when
+`install.sh` last ran. Changing it and only restarting the service leaves both
+channels pointing at the old port and the dot grey. If you must move it, edit
+`agent.conf`, re-run `install.sh` to re-render the mDNS record, and expect to
+type `host:8765`-style addresses into the empty-state panel by hand for tailnet
+boxes. Restricting exposure is what `BIND` is for.
+
+Inline comments are stripped, so `WARN_GPU_TEMP=90  # rack runs hot` works. A
+value the agent cannot parse falls back to the default above rather than failing
+the start, so check `journalctl -u dgx-spark-bar-agent` after an edit.
+
 ### What turns the dot yellow or red
 
 Three rules, with thresholds adapted from
 [spark-doctor](https://github.com/joeynyc/spark-doctor) (MIT):
 
-* **Power cap / throttling** — GPU above 80% utilisation while drawing ≤25 W at
-  an SM clock below 800 MHz, for three polls in a row. One dip is noise; three is
-  a state. This is the rule that catches a demo running at a quarter speed.
+* **Power cap / throttling** — GPU above 80% utilisation while drawing ≤25 W,
+  for three polls in a row. One dip is noise; three is a state. Yellow on its
+  own; red when the SM clock is also under 800 MHz in that run. This is the rule
+  that catches a demo running at a quarter speed.
 * **Memory pressure** — `/proc/pressure/memory` full avg10 above 0.10 (0.25 is
   critical), or available memory under 16 GB / 8 GB. On GB10 this is what "the
   model did not fit" looks like: there is no framebuffer to fill.
@@ -237,6 +262,9 @@ ssh <user>@<host> 'systemctl status dgx-spark-bar-agent --no-pager; journalctl -
 every discovery candidate and every probe result:
 
 ```bash
+# Quit first — `open` cannot set the environment of a process that is already
+# running, and it says so on stderr and exits 0, which is easy to miss.
+osascript -e 'quit app "DGXSparkBar"' 2>/dev/null; sleep 1
 open --env DGX_SPARK_BAR_DEBUG=1 --stderr /tmp/dgx-spark-bar.log /Applications/DGXSparkBar.app
 tail -f /tmp/dgx-spark-bar.log
 ```
@@ -265,12 +293,18 @@ rm -rf /Applications/DGXSparkBar.app   # on the Mac
 Without `--purge` the config at `/etc/dgx-spark-bar/agent.conf` is kept, so a
 reinstall does not lose local edits.
 
+On a Spark with no route out, the copy you installed from works the same way —
+`sudo <tarball-or-clone>/agent/uninstall.sh --purge`. Do not skip the script and
+delete files by hand: the sudoers drop-in granting NOPASSWD `poweroff`/`reboot`
+is the one piece that matters.
+
 ## Working on this repository
 
 * `agent/dgx_spark_bar_agent.py` — the whole agent. Stdlib only, on purpose: it
   must install on a fresh Spark with no pip and no virtualenv. Keep it that way.
 * `macos/Sources/DGXSparkBar/` — `Discovery` (tailnet + Bonjour), `AgentClient`
-  (HTTP), `Store` (polling), `MenuView` (UI), `DGXSparkBarApp` (the dot itself).
+  (HTTP), `Store` (polling), `MenuView` (UI), `DGXSparkBarApp` (the dot itself),
+  `Models` (the agent's JSON), `Log` (the `DGX_SPARK_BAR_DEBUG` output above).
 * `macos/build-app.sh` — SwiftPM makes a bare executable; this wraps it in a
   bundle with the `LSUIElement`, Bonjour and ATS keys the app needs. Honours
   `VERSION` and `SIGN_IDENTITY` from the environment.
