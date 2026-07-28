@@ -50,7 +50,11 @@ fi
 chown root:"$TARGET_USER" "$CONF"
 chmod 0644 "$CONF"
 
-PORT="$(sed -n 's/^PORT=//p' "$CONF" | head -1)"
+# Match the agent's own parser, which tolerates spaces around '=' and quoted
+# values — a stricter regex here would advertise 8765 over mDNS while the agent
+# listened somewhere else, and that looks exactly like a permissions problem.
+PORT="$(sed -n 's/^[[:space:]]*PORT[[:space:]]*=[[:space:]]*//p' "$CONF" \
+  | head -1 | tr -d '"'"'" | tr -d '[:space:]')"
 PORT="${PORT:-8765}"
 
 echo "==> sudo rights (poweroff + reboot only)"
@@ -68,10 +72,11 @@ systemctl restart dgx-spark-bar-agent
 
 if [[ -d /etc/avahi/services ]]; then
   echo "==> mDNS advertisement"
-  # The agent's VERSION is the only place the number is written; nothing reads
-  # this TXT record back, so a hand-edited copy would drift unnoticed forever.
-  AGENT_VERSION="$(sed -n 's/^VERSION = "\(.*\)"$/\1/p' "$SRC/dgx_spark_bar_agent.py" | head -1)"
-  sed -e "s/@PORT@/$PORT/g" -e "s/@VERSION@/$AGENT_VERSION/g" \
+  # Ask the agent rather than grepping its source: a regex over a Python literal
+  # breaks silently on a reformat and leaves 'version=' in the record forever.
+  AGENT_VERSION="$(/usr/local/bin/dgx-spark-bar-agent --version 2>/dev/null || true)"
+  AGENT_VERSION="${AGENT_VERSION:-unknown}"
+  sed -e "s|@PORT@|$PORT|g" -e "s|@VERSION@|$AGENT_VERSION|g" \
     "$SRC/dgx-spark-bar.avahi.service" > /etc/avahi/services/dgx-spark-bar.service
   systemctl reload avahi-daemon 2>/dev/null || systemctl restart avahi-daemon || true
 else

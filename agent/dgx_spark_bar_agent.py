@@ -39,6 +39,7 @@ import json
 import os
 import socket
 import subprocess
+import sys
 import threading
 import time
 from collections import deque
@@ -53,6 +54,7 @@ HISTORY_LEN = 60      # the last 60 polls — ~5 minutes at the client's 5 s rat
 MIN_INTERVAL = 1.0    # two clients polling at once share one measurement
 FRESH_WINDOW = 0.2    # length of the self-timed window on the first poll
 STALE_AFTER = 30.0    # older than this and the previous poll is not a baseline
+MAX_BODY_BYTES = 4096  # the only POST body is {"action": "..."} — tens of bytes
 
 # Every default lives here and nowhere else: conf_int/conf_list fall back to
 # this table rather than to a literal at the call site.
@@ -71,6 +73,10 @@ POWER_CAP_UTIL_PCT = 80        # "busy" for the purposes of the low-power rule
 POWER_CAP_WATTS = 25           # field reports cluster around a 14 W cap
 POWER_CAP_CLOCK_MHZ = 800      # a low SM clock alongside it raises confidence
 POWER_CAP_MIN_SAMPLES = 3      # one dip is noise; three polls in a row is a state
+POWER_CAP_MIN_SECONDS = 10.0   # ...and that run has to span real time. History
+                               # grows once per client poll, so without this floor
+                               # N Macs watching would shrink "three in a row"
+                               # from ~10 s of evidence to ~10/N s.
 MEM_AVAIL_WARN_GB = 16
 MEM_AVAIL_CRIT_GB = 8
 MEM_AVAIL_WARN_RATIO = 0.15
@@ -91,6 +97,12 @@ def load_conf(path: str) -> dict[str, str]:
                 if not line or line.startswith("#") or "=" not in line:
                     continue
                 key, _, val = line.partition("=")
+                # Trailing comments are cut, not kept: agent.conf.example is
+                # densely commented and teaches the habit, and without this
+                # `CRIT_GPU_TEMP=95  # runs hot` parses as a string that conf_int
+                # rejects — silently restoring 90 while the file on disk says 95.
+                # No value here can legitimately contain '#'.
+                val, _, _ = val.partition("#")
                 conf[key.strip()] = val.strip().strip('"').strip("'")
     except FileNotFoundError:
         pass
@@ -100,15 +112,28 @@ def load_conf(path: str) -> dict[str, str]:
 CONF = load_conf(CONF_PATH)
 
 
-def conf_list(key: str) -> list[str]:
-    raw = CONF.get(key) or DEFAULTS.get(key, "")
+def conf_str(key: str) -> str:
+    """The one place a configured value is resolved. An explicitly empty value
+    (`BIND=` on a line of its own) falls back rather than winning: an empty BIND
+    would bind every interface, which is the opposite of what someone editing
+    that key wants."""
+    return CONF.get(key) or DEFAULTS[key]
+
+
+def _split_list(raw: str) -> list[str]:
     return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+def conf_list(key: str) -> list[str]:
+    # A value that is non-empty but parses to nothing (`DISKS=,`) falls back too,
+    # so the root filesystem is always reported and the disk rule always has input.
+    return _split_list(conf_str(key)) or _split_list(DEFAULTS[key])
 
 
 def conf_int(key: str) -> int:
     try:
-        return int(CONF[key])
-    except (KeyError, TypeError, ValueError):
+        return int(conf_str(key))
+    except ValueError:
         return int(DEFAULTS[key])
 
 
@@ -275,13 +300,20 @@ def disks() -> list[dict]:
 
 
 class Reading(NamedTuple):
-    """Counters that only mean anything as a delta against an earlier reading."""
+    """Counters that only mean anything as a delta against an earlier reading.
+
+    Two clocks on purpose: `at` is monotonic and is the only one the deltas and
+    the staleness test are allowed to use, because a Spark with no RTC steps its
+    wall clock the moment timesyncd first answers — and a backwards step would
+    otherwise read as "no time passed" and turn a 5 s window into a 1 ms one.
+    `wall` is what the snapshot reports to a client, which wants a real date."""
 
     busy: int
     total: int
     rx: int
     tx: int
     at: float
+    wall: float
     iface: str
 
 
@@ -289,7 +321,7 @@ def take_reading() -> Reading:
     iface = default_iface()
     busy, total = cpu_total()
     rx, tx = net_counters(iface)
-    return Reading(busy, total, rx, tx, time.time(), iface)
+    return Reading(busy, total, rx, tx, time.monotonic(), time.time(), iface)
 
 
 class Monitor:
@@ -313,15 +345,20 @@ class Monitor:
         self._lock = threading.Lock()
         self._prev: Reading | None = None
         self._cached: dict | None = None
+        # Stamped when _measure RETURNS, not from the snapshot's own ts: ts is
+        # taken before the nvidia-smi fork, so reusing it here would spend the
+        # whole MIN_INTERVAL window on the very work the window exists to share.
+        self._cached_at = 0.0
         self.history: deque[dict] = deque(maxlen=HISTORY_LEN)
 
     def read(self) -> tuple[dict, list[dict]]:
         with self._lock:
-            if self._cached and time.time() - self._cached["ts"] < MIN_INTERVAL:
+            if self._cached and time.monotonic() - self._cached_at < MIN_INTERVAL:
                 return self._cached, list(self.history)
 
             snapshot = self._measure()
             self._cached = snapshot
+            self._cached_at = time.monotonic()
             gpu = snapshot["gpu"]
             self.history.append(
                 {
@@ -358,7 +395,7 @@ class Monitor:
         used_kb = max(total_kb - avail_kb, 0)
 
         return {
-            "ts": cur.at,
+            "ts": cur.wall,
             "cpu": {"pct": cpu_pct, "tempC": cpu_temp()},
             "memory": {
                 "totalKb": total_kb,
@@ -374,8 +411,10 @@ class Monitor:
                 "rxMbs": round(max(cur.rx - prev.rx, 0) / elapsed / 1e6, 2),
                 "txMbs": round(max(cur.tx - prev.tx, 0) / elapsed / 1e6, 2),
             },
-            # rides the same cache: statvfs on a stuck mount is not something to
-            # repeat once per request when the numbers move on a scale of minutes
+            # Rides the same cache so concurrent clients share one pass. Note it
+            # runs under Monitor._lock: statvfs on a hung NFS mount blocks
+            # uninterruptibly and will hold every other /status behind it, so
+            # DISKS should list local mounts.
             "disks": disks(),
         }
 
@@ -399,12 +438,23 @@ def finding(fid: str, severity: str, title: str, detail: str, hint: str = "") ->
 def rule_power_cap(history: list[dict]) -> list[dict]:
     """Busy GPU + very low watts = the Spark is parked in a low-power state.
     Adapted from spark-doctor's power.low_draw_under_load."""
-    busy_and_starved = [
-        s for s in history
-        if (s.get("gpu") or 0) >= POWER_CAP_UTIL_PCT
-        and s.get("w") is not None and s["w"] <= POWER_CAP_WATTS
-    ]
+    # The longest UNBROKEN run, not a count across the whole history: three dips
+    # scattered over five minutes are three dips, and calling that a power cap
+    # sends someone off to unplug a working machine.
+    longest: list[dict] = []
+    run_: list[dict] = []
+    for s in history:
+        if ((s.get("gpu") or 0) >= POWER_CAP_UTIL_PCT
+                and s.get("w") is not None and s["w"] <= POWER_CAP_WATTS):
+            run_.append(s)
+            if len(run_) > len(longest):
+                longest = list(run_)
+        else:
+            run_ = []
+    busy_and_starved = longest
     if len(busy_and_starved) < POWER_CAP_MIN_SAMPLES:
+        return []
+    if busy_and_starved[-1]["t"] - busy_and_starved[0]["t"] < POWER_CAP_MIN_SECONDS:
         return []
     low_clock = any(
         s.get("mhz") is not None and s["mhz"] <= POWER_CAP_CLOCK_MHZ
@@ -415,8 +465,9 @@ def rule_power_cap(history: list[dict]) -> list[dict]:
         "power.low_draw_under_load",
         "critical" if low_clock else "warning",
         "GPU busy but drawing almost no power",
-        f"{len(busy_and_starved)} polls with util ≥ {POWER_CAP_UTIL_PCT}% at "
-        f"≤ {POWER_CAP_WATTS} W (low: {worst['w']} W, {worst.get('mhz')} MHz)",
+        f"{len(busy_and_starved)} polls in a row with util ≥ {POWER_CAP_UTIL_PCT}% "
+        f"at ≤ {POWER_CAP_WATTS} W (low: {worst['w']} W, "
+        f"{worst['mhz'] if worst.get('mhz') is not None else '?'} MHz)",
         "Power the Spark down, unplug the brick for 60 s, boot again.",
     )]
 
@@ -473,7 +524,7 @@ def rule_disks(fast: dict) -> list[dict]:
     return [
         finding("disk.filling_up", "warning", f"Disk {d['mount']} is {d['pct']}% full",
                 f"{d['freeGb']} GB free of {d['totalGb']} GB")
-        for d in fast["disks"] if d["pct"] >= limit
+        for d in (fast.get("disks") or []) if d["pct"] >= limit
     ]
 
 
@@ -522,13 +573,22 @@ ACTIONS = {
 }
 
 
+def run_action(action: str, cmd: list[str]) -> None:
+    """A reboot that works is never seen again, so only the failure needs saying —
+    but it needs saying somewhere, or "the button does nothing" has no trail at
+    all. The usual cause is the sudoers drop-in not surviving an upgrade."""
+    rc, out = run(cmd, timeout=30.0)
+    if rc != 0:
+        print(f"[dgx-spark-bar] {action} failed (rc={rc}): {out.strip()}", flush=True)
+
+
 def perform(action: str) -> tuple[int, dict]:
     cmd = ACTIONS.get(action)
     if cmd is None:
         return 400, {"ok": False, "error": f"unknown action: {action}"}
 
     # Both actions take the box away mid-response: answer first, then pull the rug.
-    timer = threading.Timer(1.0, run, args=(cmd,), kwargs={"timeout": 30.0})
+    timer = threading.Timer(1.0, run_action, args=(action, cmd))
     timer.daemon = True
     timer.start()
     return 200, {"ok": True, "action": action, "deferred": True}
@@ -539,9 +599,19 @@ def perform(action: str) -> tuple[int, dict]:
 
 class Handler(BaseHTTPRequestHandler):
     server_version = f"dgx-spark-bar/{VERSION}"
+    # There is no auth, so anyone who can reach the port can open a socket and
+    # stall. A read timeout keeps a half-sent request from parking a thread.
+    timeout = 10.0
 
     def log_message(self, fmt: str, *args) -> None:  # journald gets one line per action only
         pass
+
+    def log_error(self, fmt: str, *args) -> None:
+        """Not covered by the silence above. BaseHTTPRequestHandler routes errors
+        through log_message, so overriding that alone also swallowed every 400,
+        404 and malformed request line — on a box whose only diagnostic is
+        journald."""
+        print(f"[dgx-spark-bar] {self.address_string()} {fmt % args}", flush=True)
 
     # -- helpers -----------------------------------------------------------
     def _send(self, code: int, payload: dict) -> None:
@@ -565,7 +635,15 @@ class Handler(BaseHTTPRequestHandler):
                 "machineId": MACHINE_ID,
             })
         elif parsed.path in ("/", "/status"):
-            self._send(200, build_status())
+            try:
+                self._send(200, build_status())
+            except Exception as exc:  # noqa: BLE001 — see below
+                # One unreadable metric must not drop the socket. Without this
+                # /status dies silently while /ping keeps answering 200, which is
+                # exactly the shape the troubleshooting docs read as "discovery,
+                # not the agent" — pointing the operator at the wrong half.
+                print(f"[dgx-spark-bar] /status failed: {exc!r}", flush=True)
+                self._send(500, {"ok": False, "error": "status unavailable"})
         else:
             self._send(404, {"ok": False, "error": "not found"})
 
@@ -575,7 +653,17 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, {"ok": False, "error": "not found"})
             return
 
-        length = int(self.headers.get("Content-Length") or 0)
+        # Content-Length is attacker-supplied on a service with no auth. Unchecked,
+        # "abc" raises out of the handler and drops the connection with no status,
+        # and "-1" turns rfile.read into read-until-EOF — one parked thread per
+        # request. The only body this route accepts is a short JSON object.
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = -1
+        if not 0 <= length <= MAX_BODY_BYTES:
+            self._send(400, {"ok": False, "error": "bad content-length"})
+            return
         raw = self.rfile.read(length) if length else b"{}"
         try:
             payload = json.loads(raw.decode("utf-8") or "{}")
@@ -590,11 +678,27 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
+    # install.sh asks for this to fill the mDNS TXT record, so the version has
+    # exactly one home — the constant above — and no second reader parses for it.
+    if "--version" in sys.argv[1:]:
+        print(VERSION)
+        return
+
     port = conf_int("PORT")
-    bind = CONF["BIND"]
+    bind = conf_str("BIND")
+    try:
+        server = ThreadingHTTPServer((bind, port), Handler)
+    except OSError as exc:
+        # The unit is Restart=always/RestartSec=3, so a bad BIND becomes a silent
+        # loop. Say why once, in words: the usual cause is BIND set to a tailnet
+        # address that tailscaled has not brought up yet, because the unit waits
+        # on network-online.target and that does not cover tailscale0.
+        print(f"[dgx-spark-bar] cannot listen on {bind}:{port} — {exc}", flush=True)
+        raise SystemExit(1)
+
     print(f"[dgx-spark-bar] {VERSION} listening on {bind}:{port} (no auth — private network only)",
           flush=True)
-    ThreadingHTTPServer((bind, port), Handler).serve_forever()
+    server.serve_forever()
 
 
 if __name__ == "__main__":
