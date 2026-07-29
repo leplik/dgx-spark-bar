@@ -7,7 +7,9 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 CONFIG="${1:-release}"
 APP="build/DGXSparkBar.app"
-VERSION="${VERSION:-0.2.0}"
+# Only the fallback for a local build: a release takes its version from the tag
+# and stamps both halves with it, so this is what a developer's own build says.
+VERSION="${VERSION:-0.4.0}"
 # '-' is an ad-hoc signature, which is all a local build needs. CI passes a
 # Developer ID here so the release can be notarized.
 SIGN_IDENTITY="${SIGN_IDENTITY:--}"
