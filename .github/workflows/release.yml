@@ -100,14 +100,28 @@ jobs:
             echo "::error::a signed build needs NOTARY_APPLE_ID, NOTARY_TEAM_ID and NOTARY_PASSWORD"
             exit 1
           fi
+          creds=(--apple-id "$NOTARY_APPLE_ID" --team-id "$NOTARY_TEAM_ID" --password "$NOTARY_PASSWORD")
+
           ditto -c -k --keepParent macos/build/DGXSparkBar.app "$RUNNER_TEMP/notarize.zip"
-          # --wait blocks until Apple returns a verdict; without it the job would
-          # go on to staple a ticket that does not exist yet.
-          xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" \
-            --apple-id "$NOTARY_APPLE_ID" \
-            --team-id "$NOTARY_TEAM_ID" \
-            --password "$NOTARY_PASSWORD" \
-            --wait --timeout 30m
+
+          # submit and wait are split so the id survives a timeout. `submit --wait`
+          # prints the id too, but only into a log nobody reads when the step is
+          # red — and giving up on the queue does NOT cancel the submission, so
+          # without the id there is no way to ask Apple what it decided later.
+          id="$(xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" "${creds[@]}" \
+                  --output-format json | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
+          echo "::notice::notarization submission $id"
+
+          # Two hours, not thirty minutes: a team's first-ever submission goes
+          # through extra account verification and can sit in the queue for
+          # hours. Runner minutes are free on public repos, a wrong verdict
+          # is not.
+          if ! xcrun notarytool wait "$id" "${creds[@]}" --timeout 2h; then
+            echo "::error::notarization did not finish — Apple's log for $id follows"
+            xcrun notarytool log "$id" "${creds[@]}" || true
+            exit 1
+          fi
+
           # Staple after the verdict, so the app carries its own ticket and
           # launches on a Mac that is offline the first time it is opened.
           xcrun stapler staple macos/build/DGXSparkBar.app
