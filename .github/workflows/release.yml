@@ -101,47 +101,42 @@ jobs:
           # line in AGENTS.md already handles for the agent-driven install.
           ALLOW_UNNOTARIZED: ${{ vars.ALLOW_UNNOTARIZED }}
         run: |
-          set -euo pipefail
+          set -uo pipefail
           if [[ -z "${NOTARY_PASSWORD:-}" ]]; then
             echo "::error::a signed build needs NOTARY_APPLE_ID, NOTARY_TEAM_ID and NOTARY_PASSWORD"
             exit 1
           fi
-          creds=(--apple-id "$NOTARY_APPLE_ID" --team-id "$NOTARY_TEAM_ID" --password "$NOTARY_PASSWORD")
 
-          ditto -c -k --keepParent macos/build/DGXSparkBar.app "$RUNNER_TEMP/notarize.zip"
+          # 20 means Apple never answered and we chose to ship anyway; the two
+          # later steps that ask "did Apple bless this" have to know.
+          macos/notarize.sh macos/build/DGXSparkBar.app
+          case $? in
+            0)  echo "stapled=true"  >> "$GITHUB_OUTPUT" ;;
+            20) echo "stapled=false" >> "$GITHUB_OUTPUT" ;;
+            *)  exit 1 ;;
+          esac
 
-          # submit and wait are split so the id survives a timeout. `submit --wait`
-          # prints the id too, but only into a log nobody reads when the step is
-          # red — and giving up on the queue does NOT cancel the submission, so
-          # without the id there is no way to ask Apple what it decided later.
-          id="$(xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" "${creds[@]}" \
-                  --output-format json | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
-          echo "::notice::notarization submission $id"
+      - name: Disk image
+        if: steps.sign.outputs.identity != '-'
+        env:
+          SIGN_IDENTITY: ${{ steps.sign.outputs.identity }}
+          NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
+          NOTARY_TEAM_ID: ${{ secrets.NOTARY_TEAM_ID }}
+          NOTARY_PASSWORD: ${{ secrets.NOTARY_PASSWORD }}
+          ALLOW_UNNOTARIZED: ${{ vars.ALLOW_UNNOTARIZED }}
+        run: |
+          set -uo pipefail
+          # Built from the app the previous step just stapled, so the copy a user
+          # drags into /Applications carries its own ticket and does not depend
+          # on the image it came out of.
+          macos/make-dmg.sh || exit 1
 
-          # Two hours, not thirty minutes: a team's first-ever submission goes
-          # through extra account verification and can sit in the queue for
-          # hours. Runner minutes are free on public repos, a wrong verdict is
-          # not. But there is no point buying two hours of patience when the
-          # answer is already "ship it either way" — give the queue a fair
-          # chance and move on.
-          timeout=2h
-          [[ "${ALLOW_UNNOTARIZED:-}" == "true" ]] && timeout=20m
-
-          if ! xcrun notarytool wait "$id" "${creds[@]}" --timeout "$timeout"; then
-            xcrun notarytool log "$id" "${creds[@]}" || true
-            if [[ "${ALLOW_UNNOTARIZED:-}" == "true" ]]; then
-              echo "::warning::shipping $id unnotarized — ALLOW_UNNOTARIZED is set"
-              echo "stapled=false" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-            echo "::error::notarization did not finish for $id"
-            exit 1
-          fi
-
-          # Staple after the verdict, so the app carries its own ticket and
-          # launches on a Mac that is offline the first time it is opened.
-          xcrun stapler staple macos/build/DGXSparkBar.app
-          echo "stapled=true" >> "$GITHUB_OUTPUT"
+          # The image is signed and notarized in its own right: an app's ticket
+          # says nothing about the container it was shipped in, and Gatekeeper
+          # checks the .dmg first, when it is the thing being double-clicked.
+          macos/notarize.sh macos/build/DGXSparkBar.dmg
+          rc=$?   # captured once: a second $? would report the test, not the script
+          [[ $rc -eq 0 || $rc -eq 20 ]] || exit 1
 
       - name: Package
         env:
@@ -151,6 +146,16 @@ jobs:
           mkdir -p dist
           # ditto, not zip: it preserves the bundle's symlinks and resource forks.
           ditto -c -k --keepParent macos/build/DGXSparkBar.app dist/DGXSparkBar.zip
+          assets=(DGXSparkBar.zip dgx-spark-bar-agent.tar.gz)
+
+          # The image only exists when there was an identity to sign it with; an
+          # ad-hoc fork build ships the zip alone rather than a broken .dmg. The
+          # test is its own statement, not `&& cp`: under set -e a false && is a
+          # failed command and would end the step here.
+          if [[ -f macos/build/DGXSparkBar.dmg ]]; then
+            cp macos/build/DGXSparkBar.dmg dist/
+            assets+=(DGXSparkBar.dmg)
+          fi
 
           STAGE="$RUNNER_TEMP/pkg/dgx-spark-bar-agent"
           mkdir -p "$STAGE"
@@ -167,7 +172,7 @@ jobs:
 
           # Basenames only: the assets are downloaded flat, so `shasum -c` has to
           # find them next to the sums file rather than under a dist/ that never ships.
-          (cd dist && shasum -a 256 DGXSparkBar.zip dgx-spark-bar-agent.tar.gz > SHA256SUMS.txt)
+          (cd dist && shasum -a 256 "${assets[@]}" > SHA256SUMS.txt)
           cat dist/SHA256SUMS.txt
 
       - name: Verify the signature survived packaging
@@ -188,6 +193,11 @@ jobs:
           if [[ "${{ steps.notarize.outputs.stapled }}" == "true" ]]; then
             spctl --assess --type execute --verbose=4 "$APP"
             xcrun stapler validate "$APP"
+            # The image is checked as an image: spctl grades a .dmg under the
+            # open-file policy, not the execute one it would apply to the app.
+            spctl --assess --type open --context context:primary-signature \
+                  --verbose=4 dist/DGXSparkBar.dmg
+            xcrun stapler validate dist/DGXSparkBar.dmg
           else
             echo "::warning::no notarization ticket — skipping spctl and stapler checks"
           fi
