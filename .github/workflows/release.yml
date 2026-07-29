@@ -120,9 +120,14 @@ jobs:
 
           # Two hours, not thirty minutes: a team's first-ever submission goes
           # through extra account verification and can sit in the queue for
-          # hours. Runner minutes are free on public repos, a wrong verdict
-          # is not.
-          if ! xcrun notarytool wait "$id" "${creds[@]}" --timeout 2h; then
+          # hours. Runner minutes are free on public repos, a wrong verdict is
+          # not. But there is no point buying two hours of patience when the
+          # answer is already "ship it either way" — give the queue a fair
+          # chance and move on.
+          timeout=2h
+          [[ "${ALLOW_UNNOTARIZED:-}" == "true" ]] && timeout=20m
+
+          if ! xcrun notarytool wait "$id" "${creds[@]}" --timeout "$timeout"; then
             xcrun notarytool log "$id" "${creds[@]}" || true
             if [[ "${ALLOW_UNNOTARIZED:-}" == "true" ]]; then
               echo "::warning::shipping $id unnotarized — ALLOW_UNNOTARIZED is set"
