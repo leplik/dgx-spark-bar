@@ -182,10 +182,14 @@ curl -fsS -X POST http://<host>:8765/action \
 | `WARN_DISK_PCT` | `85` | disk usage that turns the dot yellow |
 | `WARN_GPU_TEMP` | `85` | GPU °C that turns the dot yellow |
 | `CRIT_GPU_TEMP` | `90` | GPU °C that turns it red |
+| `PLUGINS_DIR` | `/etc/dgx-spark-bar/plugins` | executables here become buttons — root-writable only |
+| `PLUGINS_LOG_DIR` | `/var/lib/dgx-spark-bar/plugin-logs` | where a plugin's output is kept and served from |
+| `LINKS_DIR` | `/etc/dgx-spark-bar/links` | one file per web UI the box serves |
 
-That is the whole file. There is nothing to point at a container stack, an
-inference server or a log directory: this monitors the machine, not what runs on
-it.
+Nothing here points at a container stack or an inference server: the agent
+monitors the machine, not what runs on it. The three drop-in directories are the
+seam for that — the operator's own buttons and links, not integrations this repo
+knows about.
 
 **`PORT` is not a free knob.** Discovery assumes 8765: the client probes tailnet
 peers on that port, and the mDNS record carries whatever `PORT` said when
@@ -214,6 +218,46 @@ Three rules, with thresholds adapted from
 * **Thermal** — GPU temperature against `WARN_GPU_TEMP` / `CRIT_GPU_TEMP`.
 
 Plus disk usage against `WARN_DISK_PCT`.
+
+### Adding a plugin or a link
+
+`install.sh` creates all three directories, so there is nothing to set up. The
+file formats are in the README ([plugins](README.md#plugins-your-buttons-not-ours),
+[links](README.md#links-open-what-the-box-serves)); what matters when you are the
+one installing them:
+
+**A plugin is code the agent will run, for anyone who can reach the port.** There
+is no auth, so the directory must stay writable by root only — the agent silently
+skips any file that is group- or world-writable, and a plugin that never appears
+as a button is usually this rather than a bad script. Install with an explicit
+mode and owner:
+
+```bash
+ssh -t <user>@<host> 'sudo install -m 0755 -o root -g root /tmp/my-deploy /etc/dgx-spark-bar/plugins/'
+```
+
+**Plugins inherit the unit's sandbox.** `ProtectHome=read-only`,
+`ProtectSystem=full` and `PrivateTmp=yes` are set in
+`dgx-spark-bar-agent.service`, so a script that writes to `$HOME` or outside
+`/var/lib` fails at runtime while looking perfectly correct on disk. Reading
+`~/.ssh` keys still works. Keep working state under `/var/lib`.
+
+**Links are data and are never executed**, but they still steer a browser, so
+they live in the same root-owned directory. Omit the host: the client fills in
+whatever address it already reached the agent on, which is what makes one file
+work over the tailnet and the LAN alike. A `URL_PATH` containing a scheme or a
+bare authority is dropped rather than followed.
+
+Verify either without a GUI:
+
+```bash
+curl -fsS http://<host>:8765/status | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["plugins"], d["links"])'
+curl -fsS -X POST http://<host>:8765/action -H 'Content-Type: application/json' -d '{"action":"plugin:my-deploy"}'
+curl -fsS "http://<host>:8765/plugin-log?name=my-deploy&bytes=2000"
+```
+
+An empty `plugins[]` with a file present means the agent rejected it: check the
+mode, the executable bit, and that the name is `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`.
 
 ### Discovery
 
