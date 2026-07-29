@@ -89,11 +89,17 @@ jobs:
         run: macos/build-app.sh
 
       - name: Notarize and staple
+        id: notarize
         if: steps.sign.outputs.identity != '-'
         env:
           NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
           NOTARY_TEAM_ID: ${{ secrets.NOTARY_TEAM_ID }}
           NOTARY_PASSWORD: ${{ secrets.NOTARY_PASSWORD }}
+          # Repository variable, not a secret: set ALLOW_UNNOTARIZED=true to ship
+          # while Apple's queue is stuck. The app stays Developer ID signed, it
+          # just carries no ticket, so Gatekeeper still asks — which the xattr
+          # line in AGENTS.md already handles for the agent-driven install.
+          ALLOW_UNNOTARIZED: ${{ vars.ALLOW_UNNOTARIZED }}
         run: |
           set -euo pipefail
           if [[ -z "${NOTARY_PASSWORD:-}" ]]; then
@@ -117,14 +123,20 @@ jobs:
           # hours. Runner minutes are free on public repos, a wrong verdict
           # is not.
           if ! xcrun notarytool wait "$id" "${creds[@]}" --timeout 2h; then
-            echo "::error::notarization did not finish — Apple's log for $id follows"
             xcrun notarytool log "$id" "${creds[@]}" || true
+            if [[ "${ALLOW_UNNOTARIZED:-}" == "true" ]]; then
+              echo "::warning::shipping $id unnotarized — ALLOW_UNNOTARIZED is set"
+              echo "stapled=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "::error::notarization did not finish for $id"
             exit 1
           fi
 
           # Staple after the verdict, so the app carries its own ticket and
           # launches on a Mac that is offline the first time it is opened.
           xcrun stapler staple macos/build/DGXSparkBar.app
+          echo "stapled=true" >> "$GITHUB_OUTPUT"
 
       - name: Package
         env:
@@ -163,8 +175,17 @@ jobs:
           ditto -x -k dist/DGXSparkBar.zip "$RUNNER_TEMP/verify"
           APP="$RUNNER_TEMP/verify/DGXSparkBar.app"
           codesign --verify --deep --strict --verbose=2 "$APP"
-          spctl --assess --type execute --verbose=4 "$APP"
-          xcrun stapler validate "$APP"
+
+          # spctl and stapler both answer "has Apple blessed this", which an
+          # unnotarized build has not — asserting either would turn the escape
+          # hatch into a failure two steps later. The signature check above is
+          # the part that still means something without a ticket.
+          if [[ "${{ steps.notarize.outputs.stapled }}" == "true" ]]; then
+            spctl --assess --type execute --verbose=4 "$APP"
+            xcrun stapler validate "$APP"
+          else
+            echo "::warning::no notarization ticket — skipping spctl and stapler checks"
+          fi
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
