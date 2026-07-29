@@ -37,6 +37,7 @@ import glob
 import hashlib
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -47,7 +48,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import NamedTuple
 from urllib.parse import urlparse
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 CONF_PATH = os.environ.get("SPARKBAR_CONF", "/etc/dgx-spark-bar/agent.conf")
 
 HISTORY_LEN = 60      # the last 60 polls — ~5 minutes at the client's 5 s rate
@@ -66,6 +67,9 @@ DEFAULTS = {
     "WARN_DISK_PCT": "85",
     "WARN_GPU_TEMP": "85",
     "CRIT_GPU_TEMP": "90",
+    # drop-in actions: every executable file here becomes a button (see Plugins)
+    "PLUGINS_DIR": "/etc/dgx-spark-bar/plugins",
+    "PLUGINS_LOG_DIR": "/var/lib/dgx-spark-bar/plugin-logs",
 }
 
 # Rule thresholds adapted from spark-doctor (MIT, github.com/joeynyc/spark-doctor).
@@ -561,6 +565,7 @@ def build_status() -> dict:
         # only the two series anyone draws; w/mhz stay on the agent for the rule
         "history": [{"t": s["t"], "cpu": s["cpu"], "gpu": s["gpu"]} for s in history],
         "actions": sorted(ACTIONS),
+        "plugins": PLUGINS.list(),
     }
 
 
@@ -583,6 +588,9 @@ def run_action(action: str, cmd: list[str]) -> None:
 
 
 def perform(action: str) -> tuple[int, dict]:
+    if action.startswith("plugin:"):
+        return PLUGINS.start(action[len("plugin:"):])
+
     cmd = ACTIONS.get(action)
     if cmd is None:
         return 400, {"ok": False, "error": f"unknown action: {action}"}
@@ -592,6 +600,171 @@ def perform(action: str) -> tuple[int, dict]:
     timer.daemon = True
     timer.start()
     return 200, {"ok": True, "action": action, "deferred": True}
+
+
+# --------------------------------------------------------------------------
+# plugins — drop-in actions: executable files in PLUGINS_DIR
+#
+# The fixed whitelist above is the product's own two switches. Everything
+# box-specific (a deploy, a demo reset, a cache warm) belongs to the OPERATOR,
+# not to this repo — so it arrives as a plugin: one executable file dropped
+# into PLUGINS_DIR becomes one button in every connected client. The agent
+# stays generic; the buttons don't.
+#
+#   * the filename is the action name (`zolli-deploy` -> action "plugin:zolli-deploy")
+#   * `# desc: <text>` in the first lines becomes the caption clients show
+#   * `# confirm: yes` asks clients to confirm before running
+#
+# A plugin runs as the agent's user, detached (setsid), with its output in
+# PLUGINS_LOG_DIR/<name>.log — `GET /plugin-log?name=X` serves the tail, so a
+# 20-minute build is watchable from the panel. One instance per plugin at a
+# time: starting a running one answers 409 rather than stacking builds.
+#
+# There is no auth, so a plugin is remote code execution for anyone who can
+# reach the port. Two things keep that honest: the dir itself is expected to
+# be writable by root only, and the agent refuses files that are group- or
+# world-writable — "can reach the port" must never become "can edit what the
+# port runs". No timeout on purpose: a legitimate build outlives any number
+# we would pick, and the log shows a hung one.
+
+PLUGIN_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+PLUGIN_HEAD_BYTES = 4096          # metadata lives in the first lines only
+PLUGIN_LOG_TAIL_MAX = 65536
+
+
+def _plugin_meta(path: str) -> dict:
+    desc, confirm = "", False
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh.read(PLUGIN_HEAD_BYTES).splitlines():
+                lowered = line.strip().lower()
+                if lowered.startswith("# desc:"):
+                    desc = line.strip()[7:].strip()
+                elif lowered.startswith("# confirm:"):
+                    confirm = lowered[10:].strip() in ("yes", "true", "1")
+    except OSError:
+        pass
+    return {"desc": desc, "confirm": confirm}
+
+
+class Plugins:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._running: dict[str, subprocess.Popen] = {}
+        self._started: dict[str, float] = {}
+        self._last: dict[str, dict] = {}   # name -> {"exit": int, "endedAt": float, "ms": int}
+
+    def _dir(self) -> str:
+        return conf_str("PLUGINS_DIR")
+
+    def log_path(self, name: str) -> str:
+        return os.path.join(conf_str("PLUGINS_LOG_DIR"), f"{name}.log")
+
+    def _safe_path(self, name: str) -> str | None:
+        """The one gate every use of a plugin file goes through."""
+        if not PLUGIN_NAME_RE.match(name):
+            return None
+        path = os.path.join(self._dir(), name)
+        try:
+            st = os.stat(path)
+        except OSError:
+            return None
+        if not os.path.isfile(path) or not os.access(path, os.X_OK):
+            return None
+        if st.st_mode & 0o022:     # group/world-writable — refuse, see header
+            return None
+        return path
+
+    def _reap(self) -> None:
+        # under self._lock
+        for name in list(self._running):
+            proc = self._running[name]
+            if proc.poll() is None:
+                continue
+            self._last[name] = {
+                "exit": proc.returncode,
+                "endedAt": time.time(),
+                "ms": int((time.monotonic() - self._started[name]) * 1000),
+            }
+            del self._running[name]
+            del self._started[name]
+
+    def list(self) -> list[dict]:
+        try:
+            names = sorted(os.listdir(self._dir()))
+        except OSError:
+            names = []
+        with self._lock:
+            self._reap()
+            out = []
+            for name in names:
+                path = self._safe_path(name)
+                if path is None:
+                    continue
+                meta = _plugin_meta(path)
+                last = self._last.get(name)
+                out.append({
+                    "name": name,
+                    "desc": meta["desc"],
+                    "confirm": meta["confirm"],
+                    "running": name in self._running,
+                    "lastExit": last["exit"] if last else None,
+                    "lastEndedAt": last["endedAt"] if last else None,
+                    "lastMs": last["ms"] if last else None,
+                })
+            return out
+
+    def start(self, name: str) -> tuple[int, dict]:
+        path = self._safe_path(name)
+        if path is None:
+            return 400, {"ok": False, "error": f"unknown plugin: {name}"}
+        with self._lock:
+            self._reap()
+            if name in self._running:
+                return 409, {"ok": False, "error": f"plugin already running: {name}"}
+            log_dir = conf_str("PLUGINS_LOG_DIR")
+            try:
+                os.makedirs(log_dir, exist_ok=True)
+                log_fh = open(self.log_path(name), "ab")
+            except OSError as exc:
+                return 500, {"ok": False, "error": f"cannot open log: {exc}"}
+            stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+            log_fh.write(f"\n===== [{stamp}] plugin {name} started =====\n".encode())
+            log_fh.flush()
+            try:
+                proc = subprocess.Popen(
+                    [path],
+                    stdout=log_fh, stderr=subprocess.STDOUT,
+                    stdin=subprocess.DEVNULL,
+                    start_new_session=True,   # survives an agent restart mid-build
+                    cwd="/",
+                )
+            except OSError as exc:
+                log_fh.close()
+                return 500, {"ok": False, "error": f"cannot start: {exc}"}
+            finally:
+                # Popen holds its own reference; ours would leak one fd per run.
+                log_fh.close()
+            self._running[name] = proc
+            self._started[name] = time.monotonic()
+        print(f"[dgx-spark-bar] plugin started: {name} (pid {proc.pid})", flush=True)
+        return 200, {"ok": True, "action": f"plugin:{name}", "pid": proc.pid}
+
+    def log_tail(self, name: str, limit: int) -> tuple[int, bytes]:
+        if not PLUGIN_NAME_RE.match(name):
+            return 400, b"bad plugin name"
+        limit = max(1, min(limit, PLUGIN_LOG_TAIL_MAX))
+        try:
+            with open(self.log_path(name), "rb") as fh:
+                fh.seek(0, os.SEEK_END)
+                size = fh.tell()
+                fh.seek(max(size - limit, 0))
+                return 200, fh.read()
+        except OSError:
+            return 404, b"no log yet"
+
+
+PLUGINS = Plugins()
 
 
 # --------------------------------------------------------------------------
@@ -644,6 +817,21 @@ class Handler(BaseHTTPRequestHandler):
                 # not the agent" — pointing the operator at the wrong half.
                 print(f"[dgx-spark-bar] /status failed: {exc!r}", flush=True)
                 self._send(500, {"ok": False, "error": "status unavailable"})
+        elif parsed.path == "/plugin-log":
+            params = dict(
+                part.split("=", 1) for part in parsed.query.split("&") if "=" in part
+            )
+            try:
+                limit = int(params.get("bytes", "8192"))
+            except ValueError:
+                limit = 8192
+            code, body = PLUGINS.log_tail(params.get("name", ""), limit)
+            self.send_response(code)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
         else:
             self._send(404, {"ok": False, "error": "not found"})
 

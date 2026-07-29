@@ -67,6 +67,20 @@ struct Sample: Codable {
     let gpu: Double
 }
 
+/// A drop-in action: one executable file in the agent's plugins dir. Optional
+/// wholesale — an 0.2 agent sends no `plugins` key and must keep decoding.
+struct PluginInfo: Codable, Identifiable, Hashable {
+    let name: String
+    let desc: String?
+    let confirm: Bool?
+    let running: Bool?
+    let lastExit: Int?
+
+    var id: String { name }
+    var needsConfirm: Bool { confirm ?? false }
+    var isRunning: Bool { running ?? false }
+}
+
 struct Status: Codable {
     let uptimeSec: Double
     let level: String
@@ -78,6 +92,7 @@ struct Status: Codable {
     let disks: [DiskInfo]
     let history: [Sample]
     let actions: [String]
+    let plugins: [PluginInfo]?
 }
 
 enum Health: String {

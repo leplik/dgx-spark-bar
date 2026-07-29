@@ -137,19 +137,26 @@ Plain JSON over HTTP. No auth, no headers required.
 | Route | Returns |
 |---|---|
 | `GET /ping` | `app`, `version`, `host`, `machineId` — the discovery beacon |
-| `GET /status` | one snapshot: cpu, memory + pressure, gpu, disks, net, `findings`, and the last 60 polls |
+| `GET /status` | one snapshot: cpu, memory + pressure, gpu, disks, net, `findings`, `plugins[]`, and the last 60 polls |
 | `GET /` | identical to `/status` |
-| `POST /action` | body `{"action": "reboot"}` or `{"action": "poweroff"}` |
+| `POST /action` | body `{"action": "reboot"}`, `{"action": "poweroff"}`, or `{"action": "plugin:<name>"}` |
+| `GET /plugin-log?name=X&bytes=N` | tail of a plugin's log, `text/plain` (N capped at 64 KiB) |
 
 `/status` carries `level` (`ok` / `warn` / `error`) and `findings[]`, each with a
 stable `id`, a severity and a plain-language `hint` — a client colours the dot
 from `level` alone and never re-implements the rules. A full response with all
 60 samples is about 3 KB.
 
-Both actions answer **before** they act: the agent replies
+Both built-in actions answer **before** they act: the agent replies
 `{"ok": true, "action": "...", "deferred": true}` and pulls the rug a second
 later, because a box that reboots mid-response never gets to send one. An
 unknown action is a 400 and is logged with the caller's address.
+
+Plugin actions (`plugin:<name>`) run one executable from `PLUGINS_DIR`
+detached, logging to `PLUGINS_LOG_DIR/<name>.log`; the reply is immediate
+(`{"ok": true, "pid": …}`), a second start while one runs is a 409, and
+`/status.plugins[]` carries `running` / `lastExit` / `lastMs` per plugin.
+See the README's Plugins section for the file format and the sandbox caveats.
 
 ```bash
 curl -fsS -X POST http://<host>:8765/action \

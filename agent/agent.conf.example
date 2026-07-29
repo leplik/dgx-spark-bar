@@ -19,3 +19,13 @@ DISKS=/
 WARN_DISK_PCT=85
 WARN_GPU_TEMP=85
 CRIT_GPU_TEMP=90
+
+# Drop-in actions (plugins): every executable file in PLUGINS_DIR becomes a
+# button in every connected client. The filename is the action name,
+# `# desc:` in the file's first lines is its caption, `# confirm: yes` asks
+# the client to confirm first. Output goes to PLUGINS_LOG_DIR/<name>.log
+# (served back at GET /plugin-log?name=X). Keep the dir writable by root only:
+# a plugin is code the agent will run, and the agent refuses group- or
+# world-writable files.
+PLUGINS_DIR=/etc/dgx-spark-bar/plugins
+PLUGINS_LOG_DIR=/var/lib/dgx-spark-bar/plugin-logs

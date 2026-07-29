@@ -85,6 +85,33 @@ between machines was more friction than the threat it removed on a network that
 is private by construction. Keep it on a tailnet or a LAN you trust. Actions are
 a fixed whitelist of two: reboot and power off.
 
+## Plugins: your buttons, not ours
+
+Anything box-specific — a deploy, a demo reset, a cache warm — stays out of
+this repo. Drop an executable into `/etc/dgx-spark-bar/plugins/` and it becomes
+a button in every connected menu-bar client:
+
+```bash
+#!/usr/bin/env bash
+# desc: Deploy the demo stack
+# confirm: yes
+exec /usr/local/bin/my-deploy
+```
+
+The filename is the action name, `# desc:` is the caption, `# confirm: yes`
+makes the client ask first. Output lands in
+`/var/lib/dgx-spark-bar/plugin-logs/<name>.log`, served back at
+`GET /plugin-log?name=X` — the client's **Log** button opens it in a browser,
+so a 20-minute build is watchable from the couch. One instance per plugin at a
+time; a green/red dot remembers how the last run ended.
+
+Two things to know before writing one. First, there is no auth, so a plugin is
+remote code execution for anyone who can reach the port: the plugins dir must
+stay writable by root only, and the agent refuses group- or world-writable
+files. Second, plugins inherit the unit's sandbox — `ProtectHome=read-only`,
+`ProtectSystem=full`, `PrivateTmp` — so keep working state under `/var/lib`
+(readable secrets like `~/.ssh` keys still work; writing to `$HOME` does not).
+
 The HTTP API, every config key, the discovery channels and the troubleshooting
 steps live in [AGENTS.md](AGENTS.md).
 

@@ -57,7 +57,7 @@ struct MetricRow: View {
 struct MenuView: View {
     @ObservedObject var store: Store
     @State private var manualEntry = ""
-    @State private var confirming: (agent: Agent, action: String)?
+    @State private var confirming: (agent: Agent, action: String, label: String)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -75,11 +75,11 @@ struct MenuView: View {
         .padding(12)
         .frame(width: 340)
         .confirmationDialog(
-            confirming.map { "\($0.action == "poweroff" ? "Shut down" : "Reboot") \($0.agent.host)?" } ?? "",
+            confirming.map { "\($0.label) \($0.agent.host)?" } ?? "",
             isPresented: Binding(get: { confirming != nil }, set: { if !$0 { confirming = nil } }),
             titleVisibility: .visible
         ) {
-            Button(confirming?.action == "poweroff" ? "Shut down" : "Reboot", role: .destructive) {
+            Button(confirming?.label ?? "Run", role: .destructive) {
                 if let confirming { store.perform(confirming.action, on: confirming.agent) }
                 confirming = nil
             }
@@ -87,9 +87,13 @@ struct MenuView: View {
         } message: {
             // The one irreversible detail: nothing on the network can turn a
             // powered-off Spark back on.
-            Text(confirming?.action == "poweroff"
-                 ? "Only the physical button can turn it back on."
-                 : "It will be back in about a minute.")
+            Text(confirming.map {
+                switch $0.action {
+                case "poweroff": "Only the physical button can turn it back on."
+                case "reboot": "It will be back in about a minute."
+                default: "Runs on the box — follow it via its Log."
+                }
+            } ?? "")
         }
     }
 
@@ -223,17 +227,68 @@ struct MenuView: View {
     private func actions(_ agent: Agent, _ status: Status) -> some View {
         let running = store.busy?.hasPrefix(agent.machineId) == true
 
-        HStack(spacing: 6) {
-            if status.actions.contains("reboot") {
-                Button("Reboot") { confirming = (agent, "reboot") }
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                if status.actions.contains("reboot") {
+                    Button("Reboot") { confirming = (agent, "reboot", "Reboot") }
+                }
+                if status.actions.contains("poweroff") {
+                    Button("Shut down") { confirming = (agent, "poweroff", "Shut down") }
+                }
+                if running { ProgressView().controlSize(.small) }
             }
-            if status.actions.contains("poweroff") {
-                Button("Shut down") { confirming = (agent, "poweroff") }
+            .disabled(running)
+
+            // Drop-in plugins: whatever executables the box's operator put in the
+            // agent's plugins dir. Nothing here knows what they do — name, desc
+            // and a log link are the whole contract.
+            if let plugins = status.plugins, !plugins.isEmpty {
+                ForEach(plugins) { plugin in
+                    pluginRow(agent, plugin, busy: running)
+                }
             }
-            if running { ProgressView().controlSize(.small) }
         }
         .font(.system(size: 11))
-        .disabled(running)
+    }
+
+    @ViewBuilder
+    private func pluginRow(_ agent: Agent, _ plugin: PluginInfo, busy: Bool) -> some View {
+        HStack(spacing: 6) {
+            Button(plugin.name) {
+                if plugin.needsConfirm {
+                    confirming = (agent, "plugin:\(plugin.name)", plugin.name)
+                } else {
+                    store.perform("plugin:\(plugin.name)", on: agent)
+                }
+            }
+            .disabled(busy || plugin.isRunning)
+
+            if plugin.isRunning {
+                ProgressView().controlSize(.small)
+            } else if let exit = plugin.lastExit {
+                Circle()
+                    .fill(exit == 0 ? Color.green : Color.red)
+                    .frame(width: 7, height: 7)
+                    .help(exit == 0 ? "last run succeeded" : "last run failed (exit \(exit))")
+            }
+
+            if let desc = plugin.desc, !desc.isEmpty {
+                Text(desc).font(.system(size: 10)).foregroundStyle(.tertiary).lineLimit(1)
+            }
+            Spacer(minLength: 0)
+            Button("Log") {
+                var parts = URLComponents(
+                    url: agent.baseURL.appendingPathComponent("plugin-log"),
+                    resolvingAgainstBaseURL: false
+                )
+                parts?.queryItems = [
+                    URLQueryItem(name: "name", value: plugin.name),
+                    URLQueryItem(name: "bytes", value: "65536"),
+                ]
+                if let url = parts?.url { NSWorkspace.shared.open(url) }
+            }
+            .font(.system(size: 10))
+        }
     }
 
     private var footer: some View {
