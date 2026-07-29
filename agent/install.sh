@@ -57,11 +57,14 @@ PORT="$(sed -n 's/^[[:space:]]*PORT[[:space:]]*=[[:space:]]*//p' "$CONF" \
   | head -1 | tr -d '"'"'" | tr -d '[:space:]')"
 PORT="${PORT:-8765}"
 
-echo "==> plugins dir + log dir"
+echo "==> plugins dir + links dir + log dir"
 # The plugins dir stays root-writable ONLY — a plugin is code the agent will run,
 # and the agent itself refuses group/world-writable files. Logs are written by
 # the agent's (non-root) user.
 install -d -m 0755 "$CONF_DIR/plugins"
+# links are data, never executed — but they still say where a client should
+# point a browser, so they stay root-writable alongside the plugins.
+install -d -m 0755 "$CONF_DIR/links"
 install -d -m 0755 -o "$TARGET_USER" /var/lib/dgx-spark-bar/plugin-logs
 
 echo "==> sudo rights (poweroff + reboot only)"

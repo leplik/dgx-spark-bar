@@ -112,6 +112,30 @@ files. Second, plugins inherit the unit's sandbox — `ProtectHome=read-only`,
 `ProtectSystem=full`, `PrivateTmp` — so keep working state under `/var/lib`
 (readable secrets like `~/.ssh` keys still work; writing to `$HOME` does not).
 
+## Links: open what the box serves
+
+A plugin runs *on the box*. Opening a web UI happens on your laptop, so it
+cannot be one — a headless Spark has no browser. Declare it instead: drop a
+file into `/etc/dgx-spark-bar/links/` and the client shows a button that opens
+it, next to a dot saying whether the port is answering.
+
+```ini
+NAME=Open Zolli
+PORT=3200
+URL_PATH=/
+DESC=Customer cabinet
+```
+
+No host, on purpose. The client fills in the host it is already talking to, so
+one file works over the tailnet, over the LAN and over a manually added address
+without knowing any of them — and a link can only ever point at the box itself.
+These files are data: never executed, and a `URL_PATH` carrying a scheme or a
+bare authority is dropped.
+
+The dot is advisory: the agent probes loopback, so a service bound to a LAN
+address only reads as down while your browser still reaches it. The button is
+never disabled because of it.
+
 The HTTP API, every config key, the discovery channels and the troubleshooting
 steps live in [AGENTS.md](AGENTS.md).
 

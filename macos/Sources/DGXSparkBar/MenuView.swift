@@ -214,6 +214,23 @@ struct MenuView: View {
             if let c = confirming, c.agent.id == agent.id {
                 confirmBar(c)
             } else {
+                // First, because at a demo this is the button someone reaches for.
+                if let links = status.links, !links.isEmpty {
+                    HStack(spacing: 10) {
+                        ForEach(links) { link in
+                            HStack(spacing: 4) {
+                                Circle()
+                                    .fill(link.isUp ? Color.green : Color.secondary.opacity(0.35))
+                                    .frame(width: 6, height: 6)
+                                    .help(link.isUp ? "serving" : "not answering on the box")
+                                Button(link.name) { open(link, on: agent) }
+                                    .help(link.desc ?? "")
+                            }
+                        }
+                        Spacer(minLength: 0)
+                    }
+                }
+
                 HStack(spacing: 6) {
                     if status.actions.contains("reboot") {
                         Button("Reboot") { confirming = (agent, "reboot", "Reboot") }
@@ -262,6 +279,18 @@ struct MenuView: View {
         .padding(6)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.red.opacity(0.08), in: RoundedRectangle(cornerRadius: 5))
+    }
+
+    /// The host comes from the agent this client is already talking to — never
+    /// from the box's own declaration. That is what makes one link file work
+    /// over the tailnet and over the LAN, and it keeps a link pointed at the box.
+    private func open(_ link: LinkInfo, on agent: Agent) {
+        var parts = URLComponents()
+        parts.scheme = "http"
+        parts.host = agent.baseURL.host
+        parts.port = link.port
+        parts.path = link.path
+        if let url = parts.url { NSWorkspace.shared.open(url) }
     }
 
     @ViewBuilder

@@ -137,7 +137,7 @@ Plain JSON over HTTP. No auth, no headers required.
 | Route | Returns |
 |---|---|
 | `GET /ping` | `app`, `version`, `host`, `machineId` — the discovery beacon |
-| `GET /status` | one snapshot: cpu, memory + pressure, gpu, disks, net, `findings`, `plugins[]`, and the last 60 polls |
+| `GET /status` | one snapshot: cpu, memory + pressure, gpu, disks, net, `findings`, `plugins[]`, `links[]`, and the last 60 polls |
 | `GET /` | identical to `/status` |
 | `POST /action` | body `{"action": "reboot"}`, `{"action": "poweroff"}`, or `{"action": "plugin:<name>"}` |
 | `GET /plugin-log?name=X&bytes=N` | tail of a plugin's log, `text/plain` (N capped at 64 KiB) |
@@ -157,6 +157,12 @@ detached, logging to `PLUGINS_LOG_DIR/<name>.log`; the reply is immediate
 (`{"ok": true, "pid": …}`), a second start while one runs is a 409, and
 `/status.plugins[]` carries `running` / `lastExit` / `lastMs` per plugin.
 See the README's Plugins section for the file format and the sandbox caveats.
+
+`/status.links[]` is the other half: `{name, port, path, desc, up}` read from
+`LINKS_DIR`, declaring web UIs the box serves. There is no host in the payload
+and no route to follow one — the client composes the URL from the host it is
+already using, which is what keeps a link on the box and working over every
+discovery path. `up` is a loopback probe, advisory only.
 
 ```bash
 curl -fsS -X POST http://<host>:8765/action \

@@ -29,3 +29,13 @@ CRIT_GPU_TEMP=90
 # world-writable files.
 PLUGINS_DIR=/etc/dgx-spark-bar/plugins
 PLUGINS_LOG_DIR=/var/lib/dgx-spark-bar/plugin-logs
+
+# Drop-in links: web UIs this box serves. One file per link, e.g.
+#   NAME=Open Zolli
+#   PORT=3200
+#   URL_PATH=/
+#   DESC=Customer cabinet
+# No host: the client fills in the address it already reaches the agent on, so
+# one file works over the tailnet and the LAN alike — and a link cannot point
+# off this box. These files are data and are never executed.
+LINKS_DIR=/etc/dgx-spark-bar/links

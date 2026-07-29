@@ -48,7 +48,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import NamedTuple
 from urllib.parse import urlparse
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 CONF_PATH = os.environ.get("SPARKBAR_CONF", "/etc/dgx-spark-bar/agent.conf")
 
 HISTORY_LEN = 60      # the last 60 polls — ~5 minutes at the client's 5 s rate
@@ -70,6 +70,8 @@ DEFAULTS = {
     # drop-in actions: every executable file here becomes a button (see Plugins)
     "PLUGINS_DIR": "/etc/dgx-spark-bar/plugins",
     "PLUGINS_LOG_DIR": "/var/lib/dgx-spark-bar/plugin-logs",
+    # drop-in links: web UIs this box serves, opened by the client (see Links)
+    "LINKS_DIR": "/etc/dgx-spark-bar/links",
 }
 
 # Rule thresholds adapted from spark-doctor (MIT, github.com/joeynyc/spark-doctor).
@@ -92,8 +94,11 @@ SWAP_WARN_GB = 8
 # --------------------------------------------------------------------------
 # config
 
-def load_conf(path: str) -> dict[str, str]:
-    conf = dict(DEFAULTS)
+def load_conf(path: str, base: dict[str, str] | None = None) -> dict[str, str]:
+    """`base` is what a missing key falls back to — DEFAULTS for the agent's own
+    config, and nothing at all for a link file, whose keys must come from itself
+    (inheriting the agent's PORT there would advertise a UI on 8765)."""
+    conf = dict(DEFAULTS if base is None else base)
     try:
         with open(path, "r", encoding="utf-8") as fh:
             for line in fh:
@@ -566,6 +571,7 @@ def build_status() -> dict:
         "history": [{"t": s["t"], "cpu": s["cpu"], "gpu": s["gpu"]} for s in history],
         "actions": sorted(ACTIONS),
         "plugins": PLUGINS.list(),
+        "links": links(),
     }
 
 
@@ -765,6 +771,77 @@ class Plugins:
 
 
 PLUGINS = Plugins()
+
+
+# --------------------------------------------------------------------------
+# links — web UIs the CLIENT opens; not actions the agent runs
+#
+# A plugin runs on the box. Opening a web UI happens on the operator's laptop,
+# so it cannot be one — a headless Spark has no browser to open. A link is a
+# declaration instead: "this box serves something on port N", which the client
+# turns into a button.
+#
+# The declaration carries a PORT and a path, never a host. The client fills in
+# the host it is already talking to, so ONE file works over the tailnet, over
+# the LAN and over a manually added address without knowing any of them — and a
+# link can therefore only ever point at the box itself, never off it.
+#
+#   /etc/dgx-spark-bar/links/cabinet:
+#       NAME=Open Zolli
+#       PORT=3200
+#       URL_PATH=/
+#       DESC=Customer cabinet
+#
+# Not executable, never executed, parsed by the same reader as agent.conf.
+
+LINK_PROBE_TIMEOUT = 0.25  # loopback: refused comes back immediately
+
+
+def _link_up(port: int) -> bool:
+    """Advisory only. A service bound to a LAN address but not to loopback reads
+    as down here while the client can still reach it — which is why the client
+    shows this as a dot and never disables the button."""
+    try:
+        with socket.create_connection(("127.0.0.1", port), LINK_PROBE_TIMEOUT):
+            return True
+    except OSError:
+        return False
+
+
+def links() -> list[dict]:
+    directory = conf_str("LINKS_DIR")
+    try:
+        names = sorted(os.listdir(directory))
+    except OSError:
+        return []
+    out = []
+    for name in names:
+        path = os.path.join(directory, name)
+        if not os.path.isfile(path):
+            continue
+        conf = load_conf(path, base={})
+        label = conf.get("NAME", "").strip()[:40]
+        try:
+            port = int(conf.get("PORT", ""))
+        except ValueError:
+            continue
+        if not label or not 1 <= port <= 65535:
+            continue
+        url_path = conf.get("URL_PATH", "/").strip() or "/"
+        # A scheme or a bare authority would move the target off this box, which
+        # is the one thing a link may not do.
+        if "://" in url_path or url_path.startswith("//"):
+            continue
+        if not url_path.startswith("/"):
+            url_path = "/" + url_path
+        out.append({
+            "name": label,
+            "port": port,
+            "path": url_path,
+            "desc": conf.get("DESC", "").strip()[:60],
+            "up": _link_up(port),
+        })
+    return out
 
 
 # --------------------------------------------------------------------------

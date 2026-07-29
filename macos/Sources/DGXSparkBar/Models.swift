@@ -81,6 +81,21 @@ struct PluginInfo: Codable, Identifiable, Hashable {
     var isRunning: Bool { running ?? false }
 }
 
+/// A web UI the box serves. The agent sends a port and a path but never a host:
+/// the client fills in the host it is already talking to, so one declaration
+/// works over the tailnet, the LAN and a manually added address alike.
+struct LinkInfo: Codable, Identifiable, Hashable {
+    let name: String
+    let port: Int
+    let path: String
+    let desc: String?
+    let up: Bool?
+
+    var id: String { "\(name):\(port)\(path)" }
+    /// Advisory: the agent probes loopback only, so "down" never disables the button.
+    var isUp: Bool { up ?? false }
+}
+
 struct Status: Codable {
     let uptimeSec: Double
     let level: String
@@ -93,6 +108,7 @@ struct Status: Codable {
     let history: [Sample]
     let actions: [String]
     let plugins: [PluginInfo]?
+    let links: [LinkInfo]?
 }
 
 enum Health: String {
