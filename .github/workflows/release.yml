@@ -109,8 +109,14 @@ jobs:
 
           # 20 means Apple never answered and we chose to ship anyway; the two
           # later steps that ask "did Apple bless this" have to know.
-          macos/notarize.sh macos/build/DGXSparkBar.app
-          case $? in
+          #
+          # `|| rc=$?` and not a bare call: GitHub runs these blocks as
+          # `bash -eo pipefail`, so exit 20 would kill the step before anything
+          # could interpret it — and a `set -uo pipefail` line here does not
+          # take away the -e the shell was started with.
+          rc=0
+          macos/notarize.sh macos/build/DGXSparkBar.app || rc=$?
+          case $rc in
             0)  echo "stapled=true"  >> "$GITHUB_OUTPUT" ;;
             20) echo "stapled=false" >> "$GITHUB_OUTPUT" ;;
             *)  exit 1 ;;
@@ -134,8 +140,8 @@ jobs:
           # The image is signed and notarized in its own right: an app's ticket
           # says nothing about the container it was shipped in, and Gatekeeper
           # checks the .dmg first, when it is the thing being double-clicked.
-          macos/notarize.sh macos/build/DGXSparkBar.dmg
-          rc=$?   # captured once: a second $? would report the test, not the script
+          rc=0
+          macos/notarize.sh macos/build/DGXSparkBar.dmg || rc=$?
           [[ $rc -eq 0 || $rc -eq 20 ]] || exit 1
 
       - name: Package
