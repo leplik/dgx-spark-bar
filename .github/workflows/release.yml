@@ -140,6 +140,14 @@ jobs:
           # The image is signed and notarized in its own right: an app's ticket
           # says nothing about the container it was shipped in, and Gatekeeper
           # checks the .dmg first, when it is the thing being double-clicked.
+          # The app's wait was the probe. If the queue would not answer for it,
+          # it will not answer for this either — so submit and stop waiting.
+          # The submission is still worth making: a verdict that lands after
+          # this run ends lets Gatekeeper clear the published file online.
+          if [[ "${{ steps.notarize.outputs.stapled }}" != "true" ]]; then
+            export NOTARY_NO_WAIT=true
+          fi
+
           rc=0
           macos/notarize.sh macos/build/DGXSparkBar.dmg || rc=$?
           [[ $rc -eq 0 || $rc -eq 20 ]] || exit 1

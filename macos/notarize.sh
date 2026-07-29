@@ -9,6 +9,11 @@
 #    20   Apple did not answer in time and ALLOW_UNNOTARIZED said to ship anyway
 #   else  genuinely broken
 #
+# NOTARY_NO_WAIT=true submits and returns 20 straight away. Worth doing even
+# when the verdict will arrive long after this run ends: stapling only buys
+# offline verification, so a ticket Apple issues later still lets Gatekeeper
+# clear the file we already published, online, without republishing anything.
+#
 # Both the .app and the .dmg go through here — the app's ticket does not travel
 # inside the image, and the image's does not survive being unpacked.
 set -uo pipefail
@@ -32,10 +37,16 @@ id="$(xcrun notarytool submit "$upload" "${creds[@]}" --output-format json \
 [[ -n "$id" ]] || { echo "!!  no submission id came back" >&2; exit 1; }
 echo "::notice::notarization submission $id for $(basename "$TARGET")"
 
-# No point buying two hours of patience when the answer is already "ship it
-# either way" — give the queue a fair chance and move on.
-timeout=2h
-[[ "${ALLOW_UNNOTARIZED:-}" == "true" ]] && timeout=20m
+if [[ "${NOTARY_NO_WAIT:-}" == "true" ]]; then
+  echo "::warning::submitted $(basename "$TARGET") without waiting — $id"
+  exit 20
+fi
+
+# Two hours is right when the ticket is required. When it is not, five minutes
+# is: a queue in working order answers well inside that, and the caller is only
+# using this first wait to find out whether the queue is answering at all.
+timeout="${NOTARY_TIMEOUT:-2h}"
+[[ -z "${NOTARY_TIMEOUT:-}" && "${ALLOW_UNNOTARIZED:-}" == "true" ]] && timeout=5m
 
 if xcrun notarytool wait "$id" "${creds[@]}" --timeout "$timeout"; then
   xcrun stapler staple "$TARGET" || exit 1
