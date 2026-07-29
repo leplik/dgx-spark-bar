@@ -57,6 +57,10 @@ struct MetricRow: View {
 struct MenuView: View {
     @ObservedObject var store: Store
     @State private var manualEntry = ""
+    // Confirmation is drawn INLINE, not as a confirmationDialog: in a
+    // window-style MenuBarExtra the dialog's action button tears the popover
+    // down before its action dispatches — the click lands nowhere (verified
+    // against the agent's journal: Cancel worked, confirm never arrived).
     @State private var confirming: (agent: Agent, action: String, label: String)?
 
     var body: some View {
@@ -74,27 +78,6 @@ struct MenuView: View {
         }
         .padding(12)
         .frame(width: 340)
-        .confirmationDialog(
-            confirming.map { "\($0.label) \($0.agent.host)?" } ?? "",
-            isPresented: Binding(get: { confirming != nil }, set: { if !$0 { confirming = nil } }),
-            titleVisibility: .visible
-        ) {
-            Button(confirming?.label ?? "Run", role: .destructive) {
-                if let confirming { store.perform(confirming.action, on: confirming.agent) }
-                confirming = nil
-            }
-            Button("Cancel", role: .cancel) { confirming = nil }
-        } message: {
-            // The one irreversible detail: nothing on the network can turn a
-            // powered-off Spark back on.
-            Text(confirming.map {
-                switch $0.action {
-                case "poweroff": "Only the physical button can turn it back on."
-                case "reboot": "It will be back in about a minute."
-                default: "Runs on the box — follow it via its Log."
-                }
-            } ?? "")
-        }
     }
 
     // MARK: sections
@@ -228,27 +211,57 @@ struct MenuView: View {
         let running = store.busy?.hasPrefix(agent.machineId) == true
 
         VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 6) {
-                if status.actions.contains("reboot") {
-                    Button("Reboot") { confirming = (agent, "reboot", "Reboot") }
+            if let c = confirming, c.agent.id == agent.id {
+                confirmBar(c)
+            } else {
+                HStack(spacing: 6) {
+                    if status.actions.contains("reboot") {
+                        Button("Reboot") { confirming = (agent, "reboot", "Reboot") }
+                    }
+                    if status.actions.contains("poweroff") {
+                        Button("Shut down") { confirming = (agent, "poweroff", "Shut down") }
+                    }
+                    if running { ProgressView().controlSize(.small) }
                 }
-                if status.actions.contains("poweroff") {
-                    Button("Shut down") { confirming = (agent, "poweroff", "Shut down") }
-                }
-                if running { ProgressView().controlSize(.small) }
-            }
-            .disabled(running)
+                .disabled(running)
 
-            // Drop-in plugins: whatever executables the box's operator put in the
-            // agent's plugins dir. Nothing here knows what they do — name, desc
-            // and a log link are the whole contract.
-            if let plugins = status.plugins, !plugins.isEmpty {
-                ForEach(plugins) { plugin in
-                    pluginRow(agent, plugin, busy: running)
+                // Drop-in plugins: whatever executables the box's operator put in the
+                // agent's plugins dir. Nothing here knows what they do — name, desc
+                // and a log link are the whole contract.
+                if let plugins = status.plugins, !plugins.isEmpty {
+                    ForEach(plugins) { plugin in
+                        pluginRow(agent, plugin, busy: running)
+                    }
                 }
             }
         }
         .font(.system(size: 11))
+    }
+
+    @ViewBuilder
+    private func confirmBar(_ c: (agent: Agent, action: String, label: String)) -> some View {
+        let caption = switch c.action {
+        case "poweroff": "Only the physical button can turn it back on."
+        case "reboot": "It will be back in about a minute."
+        default: "Runs on the box — follow it via its Log."
+        }
+        VStack(alignment: .leading, spacing: 4) {
+            Text("\(c.label) \(c.agent.host)?").font(.system(size: 11, weight: .medium))
+            Text(caption)
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+            HStack(spacing: 6) {
+                Button(c.label) {
+                    store.perform(c.action, on: c.agent)
+                    confirming = nil
+                }
+                .tint(.red)
+                Button("Cancel") { confirming = nil }
+            }
+        }
+        .padding(6)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.red.opacity(0.08), in: RoundedRectangle(cornerRadius: 5))
     }
 
     @ViewBuilder
